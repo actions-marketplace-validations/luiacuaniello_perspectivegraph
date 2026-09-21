@@ -3,6 +3,7 @@ package validation
 import (
 	"context"
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -145,6 +146,57 @@ func TestDiagnoseGate(t *testing.T) {
 	}
 }
 
+// "The ranking is sound" is a claim about order, and order has its own measure. The
+// diagnosis used to infer it from calibration quantities alone, so a report whose Score
+// order read "not shown to beat chance" could carry a diagnosis, right above it, saying
+// the ranking was sound. Each verdict of the discrimination metric gets the claim it
+// supports and no more.
+func TestDiagnosisClaimsTheRankingOnlyWhenDiscriminationShowsIt(t *testing.T) {
+	resolvedBins := []ReliabilityBin{{Count: 50, ObservedRate: 0.1}, {Count: 50, ObservedRate: 0.9}}
+	flatBins := []ReliabilityBin{{Count: 50, ObservedRate: 0.5}, {Count: 50, ObservedRate: 0.5}}
+	graded := func(bins []ReliabilityBin, verdict string, auc, lo, hi float64) Calibration {
+		return Calibration{
+			// Mis-scaled with resolution: exactly the dataset that used to read recalibrate-first.
+			Verdict: "overconfident", MeanPredicted: 0.6, ObservedRate: 0.4, Bins: bins,
+			Discrimination: Discrimination{Positives: 40, Negatives: 60, AUC: auc, AUCLow: lo, AUCHigh: hi, Verdict: verdict, HasData: true},
+		}
+	}
+	ungraded := graded(resolvedBins, "insufficient-data", 0.9, 0.6, 1)
+	ungraded.Discrimination.Positives = 4
+	neverGraded := graded(resolvedBins, "", 0, 0, 0)
+	neverGraded.Discrimination = Discrimination{}
+
+	cases := []struct {
+		name       string
+		cal        Calibration
+		wantPrefix string
+		soundClaim bool
+		mustSay    string
+	}{
+		{"order shown", graded(resolvedBins, "discriminates", 0.87, 0.82, 0.92), "recalibrate-first", true, "AUC 0.87 [0.82-0.92]"},
+		{"order is a coin", graded(resolvedBins, "indistinguishable-from-chance", 0.51, 0.45, 0.57), "low-resolution", false, "cannot be told apart from chance"},
+		{"order points the wrong way", graded(resolvedBins, "inverted", 0.30, 0.22, 0.38), "inverted-order", false, "AUC 0.30 [0.22-0.38]"},
+		{"too few of a class", ungraded, "recalibrate-first", false, "not yet graded"},
+		{"no discrimination at all", neverGraded, "recalibrate-first", false, "not yet graded"},
+		// The resolution branch spoke about separation too ("barely separates real from
+		// fake paths"); with an order that is shown, it must not deny it.
+		{"flat bins but order shown", graded(flatBins, "discriminates", 0.62, 0.55, 0.69), "low-resolution", false, "beats chance"},
+		{"flat bins, order not graded", graded(flatBins, "insufficient-data", 0.6, 0.3, 0.9), "low-resolution", false, "not yet graded"},
+	}
+	for _, tc := range cases {
+		got := diagnose(tc.cal)
+		if !strings.HasPrefix(got, tc.wantPrefix) {
+			t.Errorf("%s: diagnosis %q, want it to start with %q", tc.name, got, tc.wantPrefix)
+		}
+		if contains(got, "ranking is sound") != tc.soundClaim {
+			t.Errorf("%s: diagnosis %q - ranking-is-sound claim present = %v, want %v", tc.name, got, !tc.soundClaim, tc.soundClaim)
+		}
+		if !contains(got, tc.mustSay) {
+			t.Errorf("%s: diagnosis %q does not say %q", tc.name, got, tc.mustSay)
+		}
+	}
+}
+
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
@@ -180,5 +232,47 @@ func TestCalibrationEndToEndWithSegmentsAndDetection(t *testing.T) {
 	}
 	if cal.Diagnosis == "" {
 		t.Error("expected a non-empty diagnosis")
+	}
+}
+
+// The verdict separates three things a mean gap alone runs together: a real offset
+// (over/underconfident), agreement in every bin (well-calibrated), and agreement only on
+// average - which is what an uninformative score or too few samples per bin can show, and
+// which supports no claim about what any particular score means.
+func TestVerdictNeedsTheBinsToAgreeNotOnlyTheMean(t *testing.T) {
+	cases := []struct {
+		name     string
+		n        int
+		gap, ece float64
+		want     string
+	}{
+		{"below the floor", minCalibrationSamples - 1, 0, 0, "insufficient-data"},
+		{"real upward offset", 50, 0.2, 0.2, "overconfident"},
+		{"real downward offset", 50, -0.2, 0.2, "underconfident"},
+		{"mean and bins agree", 50, 0.02, 0.05, "well-calibrated"},
+		{"mean agrees, bins do not", 500, -0.006, 0.21, "calibrated-on-average"},
+		{"exactly at both tolerances", 50, calibrationGapTolerance, calibrationGapTolerance, "well-calibrated"},
+	}
+	for _, c := range cases {
+		if got := verdictFor(c.n, c.gap, c.ece); got != c.want {
+			t.Errorf("%s: verdictFor(%d, %+.3f, %.3f) = %q, want %q", c.name, c.n, c.gap, c.ece, got, c.want)
+		}
+	}
+}
+
+// A segment that is calibrated only on average has |gap| <= tolerance by definition, and the
+// structural check needs |gap| > reference + tolerance. It must never manufacture a #6.
+func TestACalibratedOnAverageSegmentNeverTriggersStructural(t *testing.T) {
+	cal := Calibration{
+		MeanPredicted: 0.5, ObservedRate: 0.5,
+		Segments: []CalibrationSegment{
+			{Name: "correlated-hops", Samples: 200, Verdict: "calibrated-on-average", MeanPredicted: 0.58, ObservedRate: 0.5},
+			{Name: "independent-hops", Samples: 200, Verdict: "well-calibrated", MeanPredicted: 0.5, ObservedRate: 0.5},
+			{Name: "long-path", Samples: 200, Verdict: "calibrated-on-average", MeanPredicted: 0.42, ObservedRate: 0.5},
+			{Name: "short-path", Samples: 200, Verdict: "well-calibrated", MeanPredicted: 0.5, ObservedRate: 0.5},
+		},
+	}
+	if s := structuralSegment(cal); s != "" {
+		t.Fatalf("a calibrated-on-average segment produced a structural diagnosis: %q", s)
 	}
 }

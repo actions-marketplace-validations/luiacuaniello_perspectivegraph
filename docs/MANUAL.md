@@ -138,6 +138,11 @@ Two boolean node attributes drive analysis:
 
 ## Risk scoring
 
+What the resulting number is the probability *of* - and the three readings it does not
+support, including "80% likely this year" - is stated in
+[positioning](POSITIONING.md#what-a-score-is-the-probability-of). This section is how it
+is computed.
+
 Each edge carries an exploit probability `p ∈ (0, 1]`. The probability that a full path is
 exploitable (assuming independence, for tractability) is the product of its edge probabilities:
 
@@ -259,7 +264,8 @@ path's **predicted score `S(P)` at test time** (captured server-side from the li
 verdict log doubles as a calibration dataset: predicted probability paired with observed outcome
 (confirmed→1, refuted→0, partial→0.5). From it `internal/validation` computes the standard scoring
 rules - **Brier score**, **log loss**, **ECE** (expected calibration error) - plus a **reliability
-diagram** (predicted vs observed per bucket) and a verdict (well-calibrated / over- / under-confident).
+diagram** (predicted vs observed per bucket) and a verdict (well-calibrated / calibrated-on-average /
+over- / under-confident).
 It also surfaces an *advisory* rescale (`observed/predicted`) rather than silently rewriting scores:
 on a thin sample that would fit noise, and on a demo's synthetic outcomes it would be circular. This
 is the demo→production boundary - the evidence that lets you defend a "55%" as a probability. Exposed
@@ -274,8 +280,8 @@ by path structure (correlated/independent hops, long/short paths, captured on th
 error concentrated on correlated/long paths is structural → a correlation-aware model (**#6**). (3)
 **Detection**: an operator can mark a confirmed verdict `detected`; a high catch rate on high-score paths
 means the score over-predicts *undetected* compromise → a detection axis (**#7**). `diagnose()` returns
-`recalibrate-first | structural (#6) | detection-axis (#7) | low-resolution` - so you build #6/#7 only when
-real verdicts prove the simpler fixes won't do.
+`recalibrate-first | structural (#6) | detection-axis (#7) | per-basis (P1) | low-resolution | inverted-order` -
+so you build #6/#7 only when real verdicts prove the simpler fixes won't do.
 
 Those real verdicts have to come from an authority *independent of the engine* - otherwise the loop is
 circular and the calibration only measures how well the engine agrees with itself. That authority is AWS.
@@ -957,6 +963,7 @@ rebuild:
 curl -s localhost:8080/auth/config
 # open:  {"authRequired":false,"mode":"none"}
 # secured: {"authRequired":true,"mode":"both","oidc":{"clientId":"…","authorizeUrl":"…"}}
+# published read-only (API_ANONYMOUS_ROLE): {"authRequired":false,"mode":"token","anonymousRole":"viewer"}
 ```
 
 A user pastes a token or clicks **Sign in with SSO**, which runs the full **OIDC
@@ -966,6 +973,24 @@ derivation is unit-tested). The credential lives only in the tab's `sessionStora
 and rides as a Bearer - never written to disk or the bundle. Token validation
 stays on the JWKS / issuer / audience the backend already enforces (fail-closed:
 it refuses to start with a JWKS URL but no `iss`/`aud`).
+
+Once past the gate, the dashboard asks **`GET /auth/me`** what the credential resolved to,
+so it offers only what the server will accept. A viewer or operator sees Suppress, Validate,
+Create ticket and Open fix PR disabled with the reason, instead of pressing one and meeting
+a 403; a mistyped, expired or revoked token sends the tab back to the sign-in screen instead
+of opening a dashboard that fails every request. The endpoint sits behind the same
+authentication as the data (401 without a valid credential) and describes only the caller:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" localhost:8080/auth/me
+# {"subject":"token:1a2b3c4d","role":"viewer","tenant":"default","anonymous":false,"canWrite":false}
+```
+
+`subject` is the caller's name in the audit log - a fingerprint, never the token.
+`canWrite` is the server's own write check answered in advance: suppressions, tickets,
+verdicts and fix PRs need `admin`. `apps` appears when reads are scoped to applications, and
+`anonymous` is true for a caller with no credential - on an open instance, or a visitor to
+a published one.
 
 #### Trying SSO end-to-end on a laptop (the bundled Keycloak)
 
@@ -1050,8 +1075,26 @@ ECE   = Σ (nₖ/N)·|meanPredₖ - obsRateₖ|         # binned calibration gap
 
 plus a **reliability diagram** (predicted vs observed per bucket; points on the
 diagonal are perfectly calibrated), an honest **verdict** (well-calibrated /
-overconfident / underconfident), and an **advisory rescale** (`observed/predicted` -
-surfaced, *not* silently applied, since rescaling on a thin sample is fitting noise).
+calibrated-on-average / overconfident / underconfident), and an **advisory rescale**
+(`observed/predicted` - surfaced, *not* silently applied, since rescaling on a thin sample
+is fitting noise).
+
+The verdict needs **both** the mean and the bins before it says well-calibrated:
+
+| verdict | mean gap | ECE | what it licenses |
+|---|---|---|---|
+| `overconfident` / `underconfident` | > 0.1 | - | the scores run hot / cold on average |
+| `calibrated-on-average` | ≤ 0.1 | > 0.1 | only the average: no individual score may be read as a probability |
+| `well-calibrated` | ≤ 0.1 | ≤ 0.1 | "when it says 70%, roughly 70% happens" |
+
+The middle row exists because the mean alone cannot carry the last one. A score whose
+outcomes do not depend on it at all can still predict the base rate on average - the
+`low-resolution` self-test scenario has a mean gap of −0.006 and an ECE of 0.21 - and it
+used to be labelled well-calibrated, which the Trust page then read aloud as "70% means
+70%". It is also what too few samples per bucket honestly produce: ECE is noisy on small
+data, so a per-score claim the data cannot support is withheld. The verdict describes the
+pooled population; a miscalibration that differs by evidence basis can still hide inside a
+well-calibrated pool, which is what the per-basis diagnosis is for.
 
 ```bash
 curl -s "$API/validations" | jq .calibration   # brier, ece, verdict, reliability bins
@@ -1061,6 +1104,46 @@ curl -s "$API/validations" | jq .calibration   # brier, ece, verdict, reliabilit
 This is the artifact that lets an operator stand behind "55%" as a *probability*,
 not a vibe - the line between a demo and a risk tool you can put in front of an
 auditor. The dashboard renders it as a **Calibration** panel on the Overview.
+
+##### Discrimination: does the *order* mean anything?
+
+Calibration grades the number; it says nothing about whether the dangerous paths sit
+above the harmless ones - and that order is what an operator works through. A score can
+be perfectly calibrated and separate nothing, or order paths sharply while every number
+it prints is wrong. So each calibration track also reports **AUC**: the probability that a
+confirmed path outranks a refuted one, ties counted half.
+
+```
+AUC = P( score(confirmed) > score(refuted) ) + ½·P(tie)   # 0.5 = coin, 1 = perfect, <0.5 = inverted
+```
+
+It is graded twice on the path track: for **S(P)** (`discrimination`) and for **Priority**
+(`priorityDiscrimination`) - the triage order itself, which is not a probability, so
+nothing above could grade it. That is why every verdict now also records the path's
+Priority *at verdict time*, captured server-side exactly like the score. A verdict
+recorded before this existed, or against a path that was no longer live, carries none,
+and simply does not count toward the triage-order grade.
+
+- `Partial` verdicts are **excluded** - half credit is not a class to a ranking comparison.
+- Each result carries an approximate **95% interval** (Hanley-McNeil). Perfect separation on
+  a small sample would otherwise report zero width, so the error is evaluated at a
+  half-count shrunk AUC; the published AUC is never shrunk.
+- The **verdict** - `discriminates` / `indistinguishable-from-chance` / `inverted` - is
+  withheld (`insufficient-data`) below **ten of each class**; the AUC is still shown.
+- A modest `priorityDiscrimination` is partly by design: Priority also weighs target
+  sensitivity and blast radius, so a refuted path to a crown jewel ranking high is the
+  order doing its job.
+
+```bash
+# GraphQL: { calibration { discrimination { auc aucLow aucHigh verdict positives negatives }
+#                          priorityDiscrimination { auc aucLow aucHigh verdict } } }
+```
+
+`make seed-validation` shows the two claims coming apart on synthetic verdicts: the
+`overconfident` scenario is badly miscalibrated yet orders paths better than any other,
+while `low-resolution` cannot be told apart from a coin. Those verdicts are generated,
+so they prove the instrument, not the engine. The dashboard shows both orders under the
+reliability diagram as **Score order** and **Triage order**.
 
 ##### Calibration diagnostics: "and therefore what should we build?"
 
@@ -1083,8 +1166,25 @@ and folds them into one **diagnosis**:
   *undetected* compromise - the signal for a detection axis (**#7**, `P(reach ∧ ¬detect)`).
 
 So the gate is honest and self-directing: `recalibrate-first` (apply the map) /
-`structural (#6)` / `detection-axis (#7)` / `low-resolution` - you build #6 or #7
-only when the evidence on real verdicts says the simpler fixes won't do.
+`structural (#6)` / `detection-axis (#7)` / `per-basis (P1)` / `low-resolution` /
+`inverted-order` - you build #6 or #7 only when the evidence on real verdicts says the
+simpler fixes won't do.
+
+Whatever the diagnosis says about the *ranking* is read from
+[discrimination](#discrimination-does-the-order-mean-anything), never inferred from the
+lenses above, which measure the numbers:
+
+| Score order verdict | What the diagnosis may say about order |
+|---|---|
+| `discriminates` | "the ranking is sound", with the AUC and its interval beside it - so a weak order that still beats chance is visible as one |
+| `indistinguishable-from-chance` | `low-resolution`: the order cannot be told apart from chance, so no rescale can help |
+| `inverted` | `inverted-order`: refuted paths outrank confirmed ones; first suspect verdicts recorded with confirmed and refuted swapped |
+| `insufficient-data` | nothing: `recalibrate-first` says the rescale is indicated and the ranking is not yet graded |
+
+A coin-flip or backwards order is settled before the structural (#6) branch - a
+correlation-aware model on evidence that orders nothing is complexity without a
+foundation - but after detection (#7) and per-basis, which carry their own evidence:
+pooling bases that run hot and cold can flatten an order the per-basis map restores.
 
 If the diagnosis ever points at #6, `make and-probe` (the `andprobe` decision tool)
 answers the question that actually decides a Bayesian Attack Graph: does your
@@ -1261,7 +1361,7 @@ harder questions, and PerspectiveGraph answers them:
   not-satisfied finding - the language GRC tooling and auditors actually consume.
 
 Both exports - OSCAL and the SIEM NDJSON enrichment feed - download straight from
-the dashboard header (**↓ OSCAL** / **↓ SIEM**), or over HTTP:
+the dashboard's **Export** menu in the top bar, or over HTTP:
 
 ```bash
 curl -s "$API/export/oscal" > oscal.json   # NIST OSCAL assessment-results
@@ -1506,6 +1606,29 @@ expiry, and store the hash rather than the value:
 API_TOKENS='sha256$9f2b…:operator:acme:2026-12-31,sha256$41ac…:viewer:acme'
 ```
 
+A token is any string that is hard to guess and contains no `:` or `,`; nothing is
+registered anywhere. Generate one, keep only its digest in the configuration, and hand the
+token itself to the client:
+
+```bash
+TOKEN=$(openssl rand -hex 32)                  # what the client sends: Authorization: Bearer $TOKEN
+printf '%s' "$TOKEN" | sha256sum                # printf, not echo: a trailing newline changes the digest
+                                                # (older macOS without sha256sum: shasum -a 256)
+API_TOKENS='sha256$<that digest>:viewer:acme:2026-12-31'
+```
+
+**In a Compose `.env` file, keep the single quotes** (or write `sha256$$…`). Compose expands
+`$` in `.env` values, so an unquoted `sha256$9f2b…` reaches the backend as `sha256:viewer`
+with the digest gone - and all it says is a warning about an unset variable. Then check what
+each token resolves to before handing it over:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" https://pg.example.com/auth/me
+# 401                 → a wrong token, or its entry was dropped at startup (the log says why)
+# "anonymous": true   → the API is not checking credentials at all
+# anything else       → the role, tenant and apps this token grants
+```
+
 The honest limit: `API_TOKENS` is read **once at startup**. Withdrawing a static
 token before its expiry means restarting the process (a rolling restart on
 Kubernetes). That is acceptable for machine credentials on a scheduled rotation, and
@@ -1646,7 +1769,7 @@ version you can pin, verify and name in a change record:
 helm install perspective oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
   --set github.token=$GITHUB_TOKEN \
   --set opensearch.url="" \
-  --version 1.12.4 # x-release-please-version
+  --version 1.17.0 # x-release-please-version
 ```
 
 The chart is cosign-signed like the images. Verify it before it templates anything into
@@ -1657,7 +1780,7 @@ unverified one is a larger hole than an unverified image:
 cosign verify \
   --certificate-identity-regexp 'https://github.com/luiacuaniello/perspectivegraph/.*' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-  ghcr.io/luiacuaniello/charts/perspectivegraph:1.12.4 # x-release-please-version
+  ghcr.io/luiacuaniello/charts/perspectivegraph:1.17.0 # x-release-please-version
 ```
 
 The chart declares `kubeVersion: >= 1.21.0-0` (the floor is `policy/v1`
@@ -1948,6 +2071,8 @@ request must be signed/authorized - otherwise you get `401`.
 
 - **API** (`API_TOKENS` set): send `Authorization: Bearer <viewer-token>` on
   every GraphQL request. The in-browser playground is disabled when auth is on.
+  `GET /auth/me` with the same header shows what the token resolved to - the quickest way
+  to tell a wrong token (401) from a role that is too low (`"canWrite": false`).
 
 - **Multi-tenant** (`INGEST_HMAC_SECRETS` / token `:tenant` suffix): add
   `-H "X-Tenant: <your-tenant>"` to ingest requests and sign with *that tenant's*
@@ -2128,6 +2253,24 @@ kubectl get ingress,service,pod,serviceaccount,role,clusterrole,rolebinding,clus
   -A -o json > cluster.json
 curl -sS -X POST "$INGEST_URL/ingest/k8s" -H 'Content-Type: application/json' --data-binary @cluster.json
 ```
+
+**From a pull request, send what the pull request renders.** A change to a manifest is
+how most routes actually open - publish a Service, widen an RBAC rule - and until the
+merge gate could attribute that change to a commit it stayed silent on exactly the kind of
+work that opens a path. So the dump accepts the same `?slug=&sha=&pr=` the scanner
+endpoints take, and stamps the objects it CONTAINS with them:
+
+```bash
+helm template . > rendered.json   # or: kustomize build . | yq -o json
+curl -sS -X POST "$INGEST_URL/ingest/k8s?slug=$SLUG&sha=$(git rev-parse HEAD)&pr=42" \
+  -H 'Content-Type: application/json' --data-binary @rendered.json
+```
+
+Two rules keep the attribution honest, and both are tested. Objects the dump only
+*mentions* are never stamped: `cluster-admin` is shipped by Kubernetes and every
+escalation ends at it, so attributing it to your commit would put that commit on every
+route in the cluster. And a dump sent without those parameters - a nightly snapshot of the
+live cluster, say - belongs to no commit and is stamped with nothing, exactly as before.
 
 #### Cloud network reachability (auto-discovered)
 
@@ -2399,8 +2542,8 @@ Those verdicts also feed **probability calibration** (`{ calibration { … } }`)
 captures the path's predicted score, so the report grades it (Brier/ECE + a reliability
 diagram), cross-validates a recalibration map, segments by path structure, tracks a
 detection axis, and folds it all into one **diagnosis** -
-`recalibrate-first | structural (#6) | detection-axis (#7) | low-resolution` - the
-answer to "and therefore what should we build?". You don't need real infra to exercise
+`recalibrate-first | structural (#6) | detection-axis (#7) | per-basis (P1) | low-resolution | inverted-order` -
+the answer to "and therefore what should we build?". You don't need real infra to exercise
 it: `make calibration-selftest SCENARIO=…` draws verdicts from a known reality and the
 gate must name the cause (also a deterministic CI test). A "Brier over time" trend on
 the Overview lets you watch the evidence accumulate.

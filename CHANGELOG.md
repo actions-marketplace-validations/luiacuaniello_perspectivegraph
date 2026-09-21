@@ -9,6 +9,119 @@ When a release needs you to **do** something - set a new variable, change a requ
 send - that is in [docs/UPGRADING.md](docs/UPGRADING.md). Read it before upgrading; a
 version absent from it needs no action.
 
+## [1.17.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.16.1...v1.17.0) (2026-09-19)
+
+
+### Features
+
+* **ingest:** let a pull request's manifests put its commit on the merge gate ([#234](https://github.com/luiacuaniello/perspectivegraph/issues/234)) ([106cf86](https://github.com/luiacuaniello/perspectivegraph/commit/106cf8645ed58c06d1aa438ba61df1bc92ce78f6))
+
+## [1.16.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.16.0...v1.16.1) (2026-09-17)
+
+
+### Bug Fixes
+
+* **chart:** rewrite the README Artifact Hub shows, and correct what it got wrong ([#232](https://github.com/luiacuaniello/perspectivegraph/issues/232)) ([e4d2808](https://github.com/luiacuaniello/perspectivegraph/commit/e4d280831e874cefc6c53d501237f2325462408e))
+
+## [1.16.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.15.0...v1.16.0) (2026-09-17)
+
+
+### Features
+
+* **auth:** add GET /auth/me so the dashboard disables writes a role cannot make ([#229](https://github.com/luiacuaniello/perspectivegraph/issues/229)) ([eecde22](https://github.com/luiacuaniello/perspectivegraph/commit/eecde22a362886a2c0aff3f9232e501903caf7cb))
+
+## [1.15.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.14.4...v1.15.0) (2026-09-17)
+
+
+### Features
+
+* **dashboard:** top navigation, readable type, honest read-only controls ([#227](https://github.com/luiacuaniello/perspectivegraph/issues/227)) ([ccbd534](https://github.com/luiacuaniello/perspectivegraph/commit/ccbd5340f46d8db8baf154191be7deef82176d23))
+
+## [1.14.4](https://github.com/luiacuaniello/perspectivegraph/compare/v1.14.3...v1.14.4) (2026-09-16)
+
+
+### Bug Fixes
+
+* **deploy:** move NATS to 2.14.7, clearing its two medium advisories ([#224](https://github.com/luiacuaniello/perspectivegraph/issues/224)) ([70d7ce9](https://github.com/luiacuaniello/perspectivegraph/commit/70d7ce902789813a0e80d4bd7b25b60ee1d2df9c))
+
+## [1.14.3](https://github.com/luiacuaniello/perspectivegraph/compare/v1.14.2...v1.14.3) (2026-09-16)
+
+
+### Bug Fixes
+
+* **deploy:** keep a published instance's rate limit and lockout per visitor ([#221](https://github.com/luiacuaniello/perspectivegraph/issues/221)) ([acaf4cd](https://github.com/luiacuaniello/perspectivegraph/commit/acaf4cd8a3ab941dd53bdcbf9cfdf0a9eafd8c41))
+
+## [1.14.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.14.1...v1.14.2) (2026-09-16)
+
+
+### Bug Fixes
+
+* **dashboard:** usable attack paths on a phone, calm read-only notice ([#219](https://github.com/luiacuaniello/perspectivegraph/issues/219)) ([94923d2](https://github.com/luiacuaniello/perspectivegraph/commit/94923d24eb8f735c05a30436111db18ffb40e3a9))
+
+## [1.14.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.14.0...v1.14.1) (2026-09-16)
+
+
+### Bug Fixes
+
+* **auth:** a published instance must not ask a visitor to sign in ([#217](https://github.com/luiacuaniello/perspectivegraph/issues/217)) ([e90573e](https://github.com/luiacuaniello/perspectivegraph/commit/e90573ee5f66c47f28e6f382768c610ba20db87e))
+
+## [1.14.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.13.3...v1.14.0) (2026-09-16)
+
+
+### Features
+
+* **auth:** publish an instance read-only, enforced by the backend ([#215](https://github.com/luiacuaniello/perspectivegraph/issues/215)) ([0c54d02](https://github.com/luiacuaniello/perspectivegraph/commit/0c54d02bbd13e7b2572e82d0b4e6dd5e94e27247))
+
+## [1.13.3](https://github.com/luiacuaniello/perspectivegraph/compare/v1.13.2...v1.13.3) (2026-09-15)
+
+
+### Bug Fixes
+
+* **mcp:** describe every tool parameter, and make the server listable ([#211](https://github.com/luiacuaniello/perspectivegraph/issues/211)) ([80a6848](https://github.com/luiacuaniello/perspectivegraph/commit/80a684894e1d577ca17909b1b33960def7601b50))
+
+## [1.13.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.13.1...v1.13.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **mcp:** tell an agent search is off instead of reporting no matches ([#209](https://github.com/luiacuaniello/perspectivegraph/issues/209)) ([7eae37d](https://github.com/luiacuaniello/perspectivegraph/commit/7eae37d0f7341fd57a7bc3b24cfdb23c694ff15c))
+
+## [1.13.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.13.0...v1.13.1) (2026-09-14)
+
+
+### Bug Fixes
+
+* **validation:** take the diagnosis's claims about order from discrimination ([#202](https://github.com/luiacuaniello/perspectivegraph/issues/202)) ([13fd819](https://github.com/luiacuaniello/perspectivegraph/commit/13fd8196e8746743a4d016bd48e394f135668ecd))
+
+## [1.13.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.12.7...v1.13.0) (2026-09-14)
+
+
+### Features
+
+* **validation:** grade the ranking, and stop calling an uninformative score well-calibrated ([#198](https://github.com/luiacuaniello/perspectivegraph/issues/198)) ([821a8a7](https://github.com/luiacuaniello/perspectivegraph/commit/821a8a77a2574537b88c76edee720bb528acbd8e))
+
+## [1.12.7](https://github.com/luiacuaniello/perspectivegraph/compare/v1.12.6...v1.12.7) (2026-09-07)
+
+
+### Bug Fixes
+
+* **ci:** the chart install test must build every image, not just the database ([#193](https://github.com/luiacuaniello/perspectivegraph/issues/193)) ([8d426dc](https://github.com/luiacuaniello/perspectivegraph/commit/8d426dcba2dcaf81ebe6398768776e8768ca6db2))
+* **helm:** the chart could not install, and the database it ships is now built here ([#191](https://github.com/luiacuaniello/perspectivegraph/issues/191)) ([e716793](https://github.com/luiacuaniello/perspectivegraph/commit/e7167938c7eaca74221fb2ae46a7b8777c3b67d1))
+
+## [1.12.6](https://github.com/luiacuaniello/perspectivegraph/compare/v1.12.5...v1.12.6) (2026-09-07)
+
+
+### Bug Fixes
+
+* guard the other way out of the cluster, and say so on the page ([#189](https://github.com/luiacuaniello/perspectivegraph/issues/189)) ([bca5d4f](https://github.com/luiacuaniello/perspectivegraph/commit/bca5d4feb9878b849c50c1f4c9883615522fcaef))
+
+## [1.12.5](https://github.com/luiacuaniello/perspectivegraph/compare/v1.12.4...v1.12.5) (2026-09-07)
+
+
+### Bug Fixes
+
+* **helm:** refuse to publish an unauthenticated instance ([#187](https://github.com/luiacuaniello/perspectivegraph/issues/187)) ([6518baa](https://github.com/luiacuaniello/perspectivegraph/commit/6518baa6e9f023228245cb939f720716c3ddd8b8))
+
 ## [1.12.4](https://github.com/luiacuaniello/perspectivegraph/compare/v1.12.3...v1.12.4) (2026-09-04)
 
 

@@ -161,10 +161,10 @@ act on everywhere, and it is worth settling before anything else in this runbook
 | Where | AGE | What it costs you |
 |---|---|---|
 | **Azure Database for PostgreSQL flexible server** | **yes** (PostgreSQL 16 and below) | The only managed service that ships it. Turned on with two server parameters (recipe below). Not available on PostgreSQL 17, and AGE is excluded from Azure's in-place major-version upgrade |
-| **Self-managed** on Kubernetes or a VM | yes | Backups, failover, patching and TLS become yours. The `apache/age` image already preloads the extension |
+| **Self-managed** on Kubernetes or a VM | yes | Backups, failover, patching and TLS become yours. The `apache/age` image, or the one this project builds in `deploy/postgres`, already preloads the extension |
 | **AWS RDS / Aurora PostgreSQL** | **no** | Not on the extension allow-list. Requests go to `rds-postgres-extensions-request@amazon.com` |
 | **Google Cloud SQL / AlloyDB** | **no** | Not in the supported-extensions list |
-| The bundled `apache/age` container | yes | **Demo only.** Not sized, backed up, patched or hardened for production |
+| The bundled `perspectivegraph-postgres` container | yes | **Demo only.** Not sized, backed up or tuned for production, whatever its vulnerability report says |
 
 So on AWS and GCP today the honest choice is to run Postgres+AGE yourself. One thing makes
 that a smaller decision than it looks: the graph is **derived** state - every node and edge
@@ -190,7 +190,7 @@ happens:
 - the role may run `LOAD 'age'` - a **superuser-only** command, which is what the bundled
   demo does and what no managed service permits; or
 - **`age` is in `shared_preload_libraries`**, so the library is present before the session
-  opens. The `apache/age` image does this by default; Azure exposes it as a parameter.
+  opens. The bundled image does this by default; Azure exposes it as a parameter.
 
 The backend works out which of the two it is on the first query and adapts. Check what you
 have with:
@@ -218,7 +218,8 @@ succeed, it fails with a privilege error.
 
 ### Self-managed
 
-Run the `apache/age` image (or your own build of the extension) as a StatefulSet, under a
+Run `ghcr.io/luiacuaniello/perspectivegraph-postgres` (or `apache/age`, or your own build
+of the extension) as a StatefulSet, under a
 PostgreSQL operator with that image, or on a VM. Whatever you pick, the list of things you
 have just taken on is the same, and none of it is optional for production: backups with a
 tested restore (§4), a replica and a failover path, patching for both PostgreSQL and AGE,
@@ -446,7 +447,7 @@ they cross the boundary - verifying inside is verifying a copy you already trust
 
 ```bash
 # The release you are approving.
-V=1.12.4 # x-release-please-version
+V=1.17.0 # x-release-please-version
 ID_RE='https://github.com/luiacuaniello/perspectivegraph/.*'
 ISSUER=https://token.actions.githubusercontent.com
 
@@ -486,7 +487,7 @@ The two images and the chart are the whole dependency set. The engine ingests wh
 to it, so no scanner needs outbound access either - only a route to the ingest port.
 
 **The database is the exception worth planning for.** Apache AGE has to come from
-somewhere: mirror the `apache/age` image for the bundled path, or have your DBA team build
+somewhere: mirror the bundled database image, or have your DBA team build
 the extension for your managed instance (§3).
 
 ## 9. Continuous delivery (Argo CD, Flux)
@@ -506,7 +507,7 @@ spec:
     repoURL: ghcr.io/luiacuaniello/charts
     chart: perspectivegraph
     # Pinned: let a bump be a reviewed commit, not a surprise resync.
-    targetRevision: 1.12.4 # x-release-please-version
+    targetRevision: 1.17.0 # x-release-please-version
     helm:
       valueFiles: [values-production.yaml] # ships inside the chart; override with your own
   destination:
@@ -527,6 +528,7 @@ capability to gain.
 ## 10. Pre-production checklist
 
 - [ ] API auth enabled (`API_TOKENS`/OIDC) and verified from an unauthenticated client.
+- [ ] `GET /auth/me` with each issued token answers the role you meant to grant.
 - [ ] Ingest HMAC (`INGEST_HMAC_SECRETS`) + `INGEST_RATE_RPS` set.
 - [ ] TLS everywhere (`TLS_*`, `POSTGRES_SSLMODE=verify-full`, `NATS_TLS_*`).
 - [ ] External Postgres+AGE chosen with §3 open (managed on Azure, self-managed on AWS/GCP),
@@ -541,3 +543,80 @@ capability to gain.
 
 See the [threat model operator assumptions](THREAT-MODEL.md#operator-assumptions-what-you-must-do-for-production)
 for the rationale behind each item.
+
+## 11. Publishing a read-only instance
+
+The opposite deployment to §10: one meant to be *reached* by people who have no credential -
+a public demo, or an internal dashboard a whole company may read. The engine supports it
+directly rather than leaving it to a proxy rule, because a rule that lives outside the
+binary is one no test holds.
+
+```bash
+# API_ANONYMOUS_ROLE=viewer: a caller with NO credential gets the viewer role.
+docker compose -f docker-compose.yml -f docker-compose.demo.yml -f docker-compose.public.yml \
+  --profile app up -d
+```
+
+On Kubernetes the same switch is `auth.anonymousRole: viewer`.
+
+**What the backend enforces.** `viewer` is the only value it accepts: anything that can
+write must be tied to a credential, and a typo (`admin`, `viewr`) stops the process at
+startup rather than being quietly downgraded. Writes stay admin-only, so an anonymous
+suppression, verdict, ticket or remediation PR answers **403**. A presented-but-wrong token
+still fails with **401** - it does not fall through to anonymous, or revoking a leaked token
+would silently demote its holder to public read instead of locking them out.
+
+**What the dashboard shows.** `GET /auth/config` answers `authRequired: false` with
+`anonymousRole: "viewer"`, so the dashboard opens without a sign-in and carries a quiet
+*read-only instance* notice, which is also what tells a visitor why a suppression is refused.
+An instance left open by accident reports no `anonymousRole` and keeps the red
+open-instance banner. The backend tells the two apart; the page does not guess.
+
+**What it does not do.**
+
+- **It does not make the data safe to publish.** Everything the dashboard shows - assets,
+  versions, reachable routes to crown jewels - becomes public. An attack map is precisely
+  what an attacker would ask for. Seed a published instance with sample data
+  (`make seed`), never with a real estate's findings.
+- **It does not close the write side.** `/ingest` is how the graph is built; never proxy
+  port 8081. Everything in `docker-compose.yml` already binds to 127.0.0.1, so publish
+  *only* the dashboard (3000) through your TLS terminator and nothing else.
+- **It does not slow anything down for you.** The costly queries (`whatIf` re-runs the
+  simulation, `kShortestPaths` enumerates routes) are now reachable without a credential,
+  so the override lowers `API_RATE_RPS` to 10 per client IP.
+
+**Per visitor, not per proxy.** A published instance is always reached through a proxy:
+in the compose recipe every visitor comes through the dashboard's nginx. Keyed on that
+peer, the rate limit and the brute-force lockout are one key for everybody, and fifty wrong
+tokens from one person lock every visitor out. That was reproduced on a real stack. So the
+override sets `TRUSTED_PROXY_CIDRS=172.16.0.0/12`, the range Docker gives `docker0` and the
+compose networks after it, and the backend reads the real client from `X-Forwarded-For`.
+It believes only the hops those addresses appended, so a visitor cannot choose a key or
+aim a lockout at someone else. Two conditions:
+
+- Your TLS proxy must set `X-Forwarded-For`. Caddy, nginx and Traefik do by default; a
+  plain TCP forwarder does not.
+- The compose network must be in that range. Check with
+  `docker network inspect <project>_default`; if your daemon allocates elsewhere (a custom
+  address pool, or more than fifteen networks on the host), set `TRUSTED_PROXY_CIDRS` to
+  that subnet.
+
+On Kubernetes the ingress controller is the proxy: set `backend.trustedProxyCidrs` to its
+pod CIDR.
+
+**Checklist for a published instance**
+
+- [ ] `API_ANONYMOUS_ROLE=viewer`, and an unauthenticated `POST /suppressions` answers 403.
+- [ ] `/auth/config` shows `"anonymousRole":"viewer"`: the dashboard shows the read-only
+      notice, not the red open-instance banner.
+- [ ] Sample data only; no connector credentials, no `GITHUB_TOKEN`, no AI keys.
+- [ ] Only the dashboard port is proxied; `/ingest` unreachable from the internet.
+- [ ] TLS at the proxy, and `API_RATE_RPS` low.
+- [ ] The backend logs `trusted proxies configured`, and the proxy CIDR covers the network
+      the dashboard runs on.
+- [ ] An `API_TOKENS` admin credential kept for yourself, if you need to change anything;
+      `/auth/me` with it answers `"canWrite": true`.
+
+An MCP client can be pointed at a published instance the same way the dashboard is: the
+server is a client of this API, so `perspectivegraph mcp --api https://<host>` answers from
+it without any credential.

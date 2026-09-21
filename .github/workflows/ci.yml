@@ -91,20 +91,31 @@ jobs:
       # single step so the coverage gate below measures them too; otherwise their files
       # count as uncovered code that nothing ever ran.
       PERSPECTIVE_TEST_MIGRATE_DSN: "postgres://perspective:perspective@localhost:5432/perspectivegraph?sslmode=disable"
-    services:
-      postgres:
-        image: apache/age:release_PG17_1.7.0@sha256:92a5d223965bc2e436f9eee436e0bd2c0d81f3b59124b3d197ec94706f3450a8
-        env:
-          POSTGRES_USER: perspective
-          POSTGRES_PASSWORD: perspective
-          POSTGRES_DB: perspectivegraph
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U perspective -d perspectivegraph"
-          --health-interval 5s --health-timeout 5s --health-retries 10
+    # No `services:` block for Postgres, deliberately. A service container starts before
+    # the first step, so it can only be an image that already exists in a registry - which
+    # would mean testing against apache/age while shipping a database built here, on musl.
+    # The one difference that matters between those two would then be the one nothing
+    # exercises. Built and started as a step instead, exactly like NATS below.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - name: Build and start the Postgres+AGE image this release ships
+        working-directory: .
+        run: |
+          set -euo pipefail
+          docker build -t perspectivegraph-postgres:ci deploy/postgres
+          docker run -d --name postgres -p 5432:5432 \
+            -e POSTGRES_USER=perspective -e POSTGRES_PASSWORD=perspective \
+            -e POSTGRES_DB=perspectivegraph \
+            -v "$PWD/deploy/postgres/init-age.sql:/docker-entrypoint-initdb.d/init-age.sql:ro" \
+            perspectivegraph-postgres:ci
+          for _ in $(seq 1 60); do
+            if docker exec postgres pg_isready -U perspective -d perspectivegraph >/dev/null 2>&1; then
+              echo "postgres up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::Postgres never became ready"; docker logs postgres; exit 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: "1.26.8"
@@ -117,7 +128,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name nats -p 4222:4222 \
-            nats:2.14.6-alpine@sha256:ad7a43eb7e3337c3c38ce5d784d1461791f95f730f252d2b25eee699752a0ca3 -js
+            nats:2.14.7-scratch@sha256:e8c4a3d844994c8a9740e42f956d4b41461618acf591b62268300432bb6a3780 -js
           for _ in $(seq 1 30); do
             if nc -z localhost 4222; then echo "nats up"; exit 0; fi
             sleep 1
@@ -245,6 +256,71 @@ jobs:
           print(f"artifacthub-repo.yml ok: {rid}, {len(owners)} owner(s)")
           PY
 
+  # The chart job above renders and inspects YAML. This one installs it.
+  #
+  # That distinction is not academic. The chart declared `runAsNonRoot: true` on the
+  # database and broker pods without a runAsUser, and every image it deployed left USER
+  # empty - so the kubelet refused both with "container has runAsNonRoot and image will
+  # run as root" and `helm install` with the DEFAULT values could not work on any cluster.
+  # Every check above passed the whole time, because the templates were correct and the
+  # mismatch lived between them and the images. Nothing short of an install finds that.
+  #
+  # Two Kubernetes versions, because `kubeVersion: ">= 1.21.0-0"` was until now a claim
+  # nothing exercised. This does not reach the declared floor - kind cannot boot a node
+  # that old - so it brackets what is actually supportable instead of pretending.
+  chart-install:
+    name: Helm install (kind ${{ matrix.k8s }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - k8s: v1.33.12
+            node: kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
+          - k8s: v1.36.1
+            node: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.16.4
+
+      # kind is compiled from its module, not downloaded as a release binary. That was
+      # helm/kind-action, and on 2026-09-14 github.com answered 504 for exactly one file -
+      # kind v0.31.0's linux-amd64 binary - while every other asset of the same release,
+      # and the same file through the API, downloaded fine. The action saves the 92-byte
+      # error page as the binary, its checksum check refuses it, and the job fails in 36s
+      # on a pull request that changed nothing here. `go install` fetches source through
+      # the Go module proxy, verified against sum.golang.org, so a broken release CDN is
+      # no longer something this gate depends on. kubectl comes from the runner image.
+      #
+      # The kind version is pinned as tightly as the node images, because the two are
+      # coupled: kind v0.31 writes a v1beta3 kubeadm config, which a v1.37 node rejects.
+      # The runner image ships its own, newer kind; the version check below proves the
+      # pinned one is the one on PATH rather than trusting PATH order.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.8"
+          cache: false
+
+      - name: Install kind v0.31.0
+        run: |
+          GOBIN="$HOME/.local/bin" go install sigs.k8s.io/kind@v0.31.0
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/kind" version
+
+      # The script creates and tears down its own cluster, so that it is the same command
+      # a contributor runs locally (`make chart-install`) rather than a CI-only path that
+      # can rot unnoticed.
+      - name: Install the chart and wait for every pod
+        env:
+          NODE_IMAGE: ${{ matrix.node }}
+        run: |
+          kind version | grep -q '^kind v0\.31\.0 ' || { echo "wrong kind on PATH: $(kind version)"; exit 1; }
+          bash scripts/chart-install.sh
+
   frontend:
     name: Frontend (React)
     runs-on: ubuntu-latest
@@ -253,11 +329,31 @@ jobs:
         working-directory: frontend
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Node is named once, in frontend/Dockerfile, so CI builds with the Node the release
+      # image does and a Dependabot bump there is complete (see scripts/node-image.sh).
+      # Assigned first, not inlined into the echo: `echo "version=$(…)"` succeeds even when
+      # the script fails, writes an empty version, and setup-node then quietly uses
+      # whatever Node the runner image has.
+      - id: node
+        name: Node version from the release Dockerfile
+        run: |
+          version="$(bash ../scripts/node-image.sh --version)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.20.0"
+          node-version: ${{ steps.node.outputs.version }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
+      # npm comes with Node, so a Node bump can carry a different npm - and npm is what
+      # writes the lockfile and talks to the audit endpoint. engines.npm states the one this
+      # project expects; when a new Node ships another, stop here and say so, rather than
+      # let the lockfile writer change underneath a green build.
+      - name: npm is the one engines.npm declares
+        run: |
+          have="$(npm -v)"
+          want="$(node -p 'require("./package.json").engines.npm')"
+          [ "$have" = "$want" ] || { echo "::error::Node $(node -v) ships npm ${have}, but package.json engines.npm is ${want} - update engines.npm and regenerate the lockfile with make lockfile"; exit 1; }
+          echo "npm ${have} (Node $(node -v))"
       # `npm ci`, never `npm install`: it installs exactly what the lockfile pins and
       # fails instead of resolving anything new, so CI tests the same dependency tree
       # the release image ships. It also means a pull request cannot silently pull in a
@@ -342,9 +438,14 @@ jobs:
           go run github.com/google/go-licenses@v1.6.0 report ./cmd/perspectivegraph 2>/dev/null \
             | grep -v "^github.com/luiacuaniello/perspectivegraph" | sort -t, -k3
 
+      - id: node
+        name: Node version from the release Dockerfile
+        run: |
+          version="$(bash scripts/node-image.sh --version)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: "24.20.0"
+          node-version: ${{ steps.node.outputs.version }}
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci --no-audit --no-fund
@@ -370,6 +471,7 @@ jobs:
         run: |
           docker build -t perspectivegraph-backend:ci backend
           docker build -t perspectivegraph-dashboard:ci frontend
+          docker build -t perspectivegraph-postgres:ci deploy/postgres
       # Installed from a SHA-pinned action rather than curling an install script off
       # a moving branch and piping it to a shell. The old form re-fetched whatever
       # `main` happened to contain at that moment and executed it in CI: a scanner
@@ -378,8 +480,14 @@ jobs:
       - uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
       # Fail on fixable HIGH/CRITICAL in the image layers (unfixable OS CVEs
       # don't block - there's nothing to do about them until a base rebuild).
+      #
+      # The database is in this loop now, and that closes the gap that let every critical
+      # in this project live somewhere nothing watched: Dependabot tracks Go, npm and
+      # Actions, this scan tracked the images CI builds, and the bundled Postgres was in
+      # neither - it was pulled, not built, and it held 100% of the criticals. It is built
+      # here now, so it is scanned here now.
       - name: Scan images
         run: |
-          for img in perspectivegraph-backend:ci perspectivegraph-dashboard:ci; do
+          for img in perspectivegraph-backend:ci perspectivegraph-dashboard:ci perspectivegraph-postgres:ci; do
             trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$img"
           done

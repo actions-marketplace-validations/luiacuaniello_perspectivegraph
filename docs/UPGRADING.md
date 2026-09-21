@@ -17,6 +17,142 @@ digest, take the backup, stage it.
 
 ---
 
+## 1.17.0
+
+### The Kubernetes feed can now put a commit on the merge gate
+
+**Affects you if** you post cluster dumps to `/ingest/k8s` *with* `?slug=&sha=`, and you
+run the merge gate.
+
+Those parameters used to be ignored by this collector: the gate blocks when a node on a
+path carries the commit, and only the scanner feeds stamped one - so a pull request that
+changed a manifest, which is how most routes open, could not turn the check red, while a
+dependency bump could. The dump now stamps the objects it contains, so those routes count.
+
+**Action: none, unless you were already sending those parameters.** If you were, and the
+dump is a snapshot of the live cluster rather than what the pull request renders, the gate
+will start attributing the whole snapshot to that commit. Drop the parameters for snapshot
+feeds; keep them for `helm template` / `kustomize build` output of the commit under test.
+Objects the dump only references (`cluster-admin`, a ServiceAccount named by a binding)
+are never stamped.
+
+---
+
+## 1.12.7
+
+### The chart could not install at all, and now can
+
+**Affects you if** you ever tried `helm install` with the default values. It failed, and
+this release is the fix.
+
+The bundled database and broker pods declared `runAsNonRoot: true` without a `runAsUser`,
+and every image the chart deployed leaves `USER` unset - which is root. The kubelet refuses
+that combination outright:
+
+```
+container has runAsNonRoot and image will run as root
+```
+
+Both pods sat in `CreateContainerConfigError` and the backend waited behind them in
+`Init:0/2` forever. CI never saw it because it rendered the templates and checked them
+against the restricted Pod Security Standard - which they passed - and never installed
+them. `make chart-install` now stands up a kind cluster and installs the chart with default
+values on two Kubernetes versions, so this class of failure cannot return silently.
+
+**Action: none, if you were using the bundled database** - it could not have been running,
+so there is nothing to migrate. An install pointed at your own PostgreSQL+AGE was never
+affected.
+
+### `postgres.image` is now a map, not a string
+
+**Affects you if** you override the bundled database image, typically as
+`--set postgres.image=...` in a pipeline. It now follows the same shape as the backend and
+dashboard images:
+
+```yaml
+postgres:
+  image:
+    repository: ghcr.io/luiacuaniello/perspectivegraph-postgres
+    tag: "" # empty = the chart's appVersion
+```
+
+A string value now fails to render rather than being ignored, which is the safe direction.
+
+### The bundled demo database is built here instead of pulled
+
+The image moves from `apache/age:release_PG17_1.7.0` to
+`ghcr.io/luiacuaniello/perspectivegraph-postgres`, built from `deploy/postgres/Dockerfile`:
+the same PostgreSQL 17 and Apache AGE 1.7.0, on Alpine instead of Debian, signed with
+cosign and carrying an SBOM and provenance like the other two.
+
+**Action: none.** The postgres uid is deliberately kept at 999, the Debian value, so an
+existing `docker compose` volume is read by the new image unchanged - this was tested by
+writing a graph with the old image and reading it back with the new one. On Kubernetes
+`PGDATA` moves to a subdirectory of the mount, which no running cluster can notice for the
+reason in the first note.
+
+Why bother, for a demo: `apache/age` is not stale - it is the official `postgres:17-trixie`
+image plus the extension - but its Debian base carried fourteen criticals, **thirteen of
+them perl and libxml2 with no fix published in any version**, so no rebuild by anyone would
+have cleared them. Alpine ships no perl. The chart's report goes from 430 findings to 4.
+
+### NATS moves to the scratch image
+
+Same server, same version, no Linux userland around it - which was twenty of that image's
+twenty-three findings. **Action: none** unless you run the compose stack with a custom
+health check for NATS: there is no shell in the image to run one, and `docker-compose.yml`
+now waits for the broker with a busybox container instead.
+
+---
+
+## 1.12.5
+
+### The chart refuses to publish an unauthenticated instance
+
+`service.type` is now a value, defaulting to `ClusterIP`, and `LoadBalancer` or `NodePort`
+is guarded exactly like the ingress: the chart refuses to render either without a
+credential. It is offered on purpose - without it, exposing the backend meant patching the
+Service by hand, which no guard in the chart could see. Nothing changes for an install
+that leaves it at `ClusterIP`.
+
+The dashboard also carries a banner, not dismissible, whenever `/auth/config` reports that
+no credential is required. It is what covers the exposure a chart cannot see - a patched
+Service, a hand-written Ingress - and it appears in `make demo` too, which runs open by
+design.
+
+
+**Affects you if** you install the Helm chart with `ingress.enabled: true` and have not
+configured a credential. `helm upgrade` will refuse to render rather than apply.
+
+Enabling the ingress is the moment an install becomes reachable, and this chart's ingress
+routes both `/graphql` — this environment's map of how to breach it — and `/ingest`, the
+write side that decides what the engine reasons over. The backend has always refused to
+start unauthenticated under `PG_ENV=production`, but that gate only fires for an operator
+who declared production; an install left on the demo default was reachable and open, with
+nothing but a startup warning that scrolls past in a log.
+
+The chart now fails to render in that combination. Set one of:
+
+```yaml
+auth:
+  apiTokens: "s3cr3t:admin"        # or oidc.jwksUrl with issuer and audience
+ingest:
+  hmacSecret: "another-secret"     # or hmacSecrets for per-tenant keys
+```
+
+Credentials supplied through `secrets.existingSecret` satisfy the guard: the chart cannot
+read a secret's contents, so an operator using one is trusted rather than blocked.
+
+If an open instance is the point — a public read-only demo — say so explicitly:
+
+```yaml
+ingress:
+  allowUnauthenticated: true
+```
+
+Nothing changes for an install with `ingress.enabled: false`, which is the default, or for
+`make demo` and Docker Compose, which bind to 127.0.0.1 only.
+
 ## 1.12.4
 
 ### The bundled demo database moves to PostgreSQL 17

@@ -662,6 +662,25 @@ func run(ctx context.Context, cfg config.Config) error {
 			"role", r.String())
 	}
 
+	// Anonymous read access, for an instance meant to be published: a public demo, or a
+	// dashboard a whole company may read. Refused rather than downgraded when it names a
+	// role that can write, because "API_ANONYMOUS_ROLE=admin" is a typo that would hand
+	// the estate to the internet, and a silent downgrade to viewer would hide it.
+	var anon *auth.Anonymous
+	if cfg.APIAnonymousRole != "" {
+		r, ok := auth.ParseRole(cfg.APIAnonymousRole)
+		if !ok {
+			return fmt.Errorf("API_ANONYMOUS_ROLE %q is not a role; the only value it accepts is viewer", cfg.APIAnonymousRole)
+		}
+		a, err := auth.NewAnonymous(r)
+		if err != nil {
+			return fmt.Errorf("API_ANONYMOUS_ROLE: %w", err)
+		}
+		anon = a
+		slog.Warn("API_ANONYMOUS_ROLE is set: ANYONE who can reach this API reads this environment's attack paths without a credential",
+			"role", r.String(), "writes", "still admin-only (403)")
+	}
+
 	// The iss/aud fail-closed rule is enforced by checkAuthConfig, before this
 	// function runs and before the process touches any dependency.
 	authn := auth.Chain{
@@ -677,6 +696,9 @@ func run(ctx context.Context, cfg config.Config) error {
 			GroupRoles:  groupRoles,
 			DefaultRole: defaultRole,
 		}),
+		// Last: a presented credential is decided by the authenticators above, so a
+		// wrong or expired token fails instead of falling back to anonymous.
+		anon,
 	}
 	if authn.Enabled() {
 		slog.Info("API auth: bearer credential required (GraphiQL disabled)")
@@ -1071,10 +1093,17 @@ func hmacSecrets(cfg config.Config) map[string]string {
 // reads (GET /auth/config). It carries no secrets - only whether a credential is
 // required and the IdP's public coordinates for an SSO redirect.
 func authInfoFromConfig(cfg config.Config, authEnabled bool) api.AuthInfo {
-	info := api.AuthInfo{Required: authEnabled, Mode: "none"}
+	// "Required" is what the dashboard's login gate reads, and it means one thing: will an
+	// anonymous call be rejected? With API_ANONYMOUS_ROLE set it will not - so a published
+	// instance must report false, or the gate would ask a visitor for a credential the
+	// deployment does not want and the API does not need. Mode still describes what a
+	// credential WOULD be, because an admin signing in to the same instance is exactly how
+	// its owner works on it.
+	info := api.AuthInfo{Required: authEnabled && cfg.APIAnonymousRole == "", Mode: "none"}
 	if !authEnabled {
 		return info
 	}
+	info.AnonymousRole = cfg.APIAnonymousRole
 	hasTokens := len(cfg.APITokens) > 0
 	hasOIDC := cfg.OIDCJWKSURL != ""
 	switch {

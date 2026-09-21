@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -209,12 +210,12 @@ func explainPath(api *API) Tool {
 func routesToTarget(api *API) Tool {
 	return Tool{
 		Name: "routes_to_target",
-		Description: "Enumerate the k best distinct routes that reach a named sensitive asset. Answers 'how many ways in ' +" +
-			"'are there, and do they share a choke point' - which single-path views hide. Cutting a hop that every route " +
+		Description: "Enumerate the k best distinct routes that reach a named sensitive asset. Answers 'how many ways in " +
+			"are there, and do they share a choke point' - which single-path views hide. Cutting a hop that every route " +
 			"traverses removes them all; cutting one that appears in a single route removes one.",
 		InputSchema: obj(map[string]any{
 			"target": map[string]any{"type": "string", "description": "Sensitive asset name, e.g. 'account-admin (effective)'."},
-			"k":      map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 5},
+			"k":      map[string]any{"type": "integer", "minimum": 1, "maximum": 20, "default": 5, "description": "How many distinct routes to return, best first. Fewer routes come back when fewer exist."},
 			"from":   map[string]any{"type": "string", "description": "Optional entry-point name to start from."},
 		}, "target"),
 		Call: func(ctx context.Context, args map[string]any) (string, error) {
@@ -243,7 +244,7 @@ func listFixes(api *API) Tool {
 			"with the share of critical-path risk it eliminates and how many routes it cuts. This is usually the right " +
 			"answer to 'what should we do' - a hundred routes typically collapse into a handful of changes.",
 		InputSchema: obj(map[string]any{
-			"app": map[string]any{"type": "string", "description": "Optional application scope."},
+			"app": map[string]any{"type": "string", "description": "Optional application scope; omit for the whole environment."},
 		}),
 		Call: func(ctx context.Context, args map[string]any) (string, error) {
 			scope := ""
@@ -273,8 +274,8 @@ func simulateFix(api *API) Tool {
 				"type": "array", "minItems": 1, "maxItems": 20,
 				"description": "Relationships to remove. Use node ids from explain_attack_path steps (from/to).",
 				"items": obj(map[string]any{
-					"from": map[string]any{"type": "string"},
-					"to":   map[string]any{"type": "string"},
+					"from": map[string]any{"type": "string", "description": "Where the relationship starts: the `from` of a step in explain_attack_path (a node id or name)."},
+					"to":   map[string]any{"type": "string", "description": "Where the relationship ends: the `to` of the same step (a node id or name)."},
 				}, "from", "to"),
 			},
 		}, "cuts"),
@@ -308,26 +309,48 @@ func simulateFix(api *API) Tool {
 	}
 }
 
+// ErrSearchDisabled is what search_assets answers on a deployment without OpenSearch.
+//
+// It is decided by asking the engine, not by reading error text. With OpenSearch off the
+// engine does not fail at all - its indexer answers "no hits" - so the old check (any
+// error mentioning "search") never fired in the case it was written for, and an agent
+// read an empty result as "no asset by that name exists". It fired instead on real
+// OpenSearch failures, whose message carries the `_search` URL, and called an outage a
+// missing feature.
+var ErrSearchDisabled = errors.New("full-text search is not enabled on this deployment (it needs OpenSearch); use list_attack_paths and get_posture instead")
+
 func searchAssets(api *API) Tool {
 	return Tool{
 		Name:        "search_assets",
 		Description: "Full-text search across indexed assets and findings by name, CVE id, or keyword. Use it to resolve a name a human mentioned into the node ids the other tools take.",
 		InputSchema: obj(map[string]any{
-			"query": map[string]any{"type": "string", "description": "e.g. 'log4j', 'PII', 'CVE-2021-44228'."},
-			"size":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10},
+			"query": map[string]any{"type": "string", "description": "Text matched against asset and finding names, labels, ids, severities and CWEs, e.g. 'log4j', 'PII', 'CVE-2021-44228'."},
+			"size":  map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum number of matches to return, best match first."},
 		}, "query"),
 		Call: func(ctx context.Context, args map[string]any) (string, error) {
 			q, _ := args["query"].(string)
 			if q == "" {
 				return "", fmt.Errorf("query is required")
 			}
-			var out json.RawMessage
-			err := api.query(ctx, fmt.Sprintf(`{ search(query: %s, size: %d) { id name label score } }`,
-				jsonString(q), intArg(args, "size", 10, 1, 50)), &out)
-			if err != nil && strings.Contains(err.Error(), "search") {
-				return "", fmt.Errorf("full-text search is not enabled on this deployment (it needs OpenSearch); use list_attack_paths and get_posture instead")
+			// searchEnabled rides in the same request: the dashboard uses it for exactly this,
+			// telling "feature off" apart from "no matches".
+			var out struct {
+				SearchEnabled bool            `json:"searchEnabled"`
+				Search        json.RawMessage `json:"search"`
 			}
-			return string(out), err
+			if err := api.query(ctx, fmt.Sprintf(`{ searchEnabled search(query: %s, size: %d) { id name label score } }`,
+				jsonString(q), intArg(args, "size", 10, 1, 50)), &out); err != nil {
+				return "", err
+			}
+			if !out.SearchEnabled {
+				return "", ErrSearchDisabled
+			}
+			hits := out.Search
+			if len(hits) == 0 || string(hits) == "null" {
+				hits = json.RawMessage("[]")
+			}
+			b, err := json.Marshal(map[string]json.RawMessage{"search": hits})
+			return string(b), err
 		},
 	}
 }
@@ -336,15 +359,23 @@ func scoreTrust(api *API) Tool {
 	return Tool{
 		Name: "get_score_trust",
 		Description: "Report how well the engine's probabilities have matched reality, measured against recorded red-team " +
-			"or BAS outcomes: the verdict (well-calibrated / overconfident / underconfident / insufficient-data), the " +
+			"or BAS outcomes: the verdict (well-calibrated / calibrated-on-average / overconfident / underconfident / " +
+			"insufficient-data; calibrated-on-average means only the average matches, so no individual score may be " +
+			"quoted as a probability), the " +
 			"predicted-versus-observed rates, and what to do about the gap. Call this before quoting any score as a " +
 			"probability. If it reports insufficient-data, the numbers are expert estimates and must be presented as " +
-			"a ranking, not as odds.",
+			"the model's own estimate, not as odds. It also reports discrimination - whether the score, and separately " +
+			"the triage Priority order, put confirmed paths above refuted ones (AUC with a 95% interval). Do not " +
+			"present the ranking as evidence of which path is most dangerous unless priorityDiscrimination reads " +
+			"'discriminates'; 'insufficient-data' or 'indistinguishable-from-chance' means the order has not been " +
+			"shown to beat a coin, and must be said so.",
 		InputSchema: obj(map[string]any{}),
 		Call: func(ctx context.Context, _ map[string]any) (string, error) {
 			var out json.RawMessage
 			err := api.query(ctx, `{
-              calibration { samples brier ece meanPredicted observedRate recommendedScale verdict hasData diagnosis }
+              calibration { samples brier ece meanPredicted observedRate recommendedScale verdict hasData diagnosis
+                discrimination { auc aucLow aucHigh verdict positives negatives hasData }
+                priorityDiscrimination { auc aucLow aucHigh verdict positives negatives hasData } }
               validation { confirmed refuted partial missed tested precision recall }
             }`, &out)
 			return string(out), err

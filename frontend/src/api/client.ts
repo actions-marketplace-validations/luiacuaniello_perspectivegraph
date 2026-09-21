@@ -173,6 +173,20 @@ export interface DetectionStats {
 // Probability calibration over tested verdicts - the demo→production artifact:
 // does a path scored 0.8 actually confirm ~80% of the time? Brier/ECE + diagram,
 // plus the diagnostics that decide whether to recalibrate or build a better model.
+// Discrimination: does a score ORDER confirmed paths above refuted ones? AUC is the
+// probability a confirmed path outranks a refuted one (ties count half); 0.5 is a coin.
+// auc/aucLow/aucHigh are null until there is at least one of each class - never 0, which
+// would read as a perfectly inverted order.
+export interface Discrimination {
+  positives: number;
+  negatives: number;
+  auc?: number | null;
+  aucLow?: number | null;
+  aucHigh?: number | null;
+  verdict: string; // discriminates | indistinguishable-from-chance | inverted | insufficient-data
+  hasData: boolean;
+}
+
 export interface Calibration {
   samples: number;
   brier: number; // mean (predicted-observed)², lower is better
@@ -181,7 +195,7 @@ export interface Calibration {
   meanPredicted: number;
   observedRate: number;
   recommendedScale?: number | null; // advisory rescale; null until enough samples
-  verdict: string; // well-calibrated | overconfident | underconfident | insufficient-data
+  verdict: string; // well-calibrated | calibrated-on-average | overconfident | underconfident | insufficient-data
   hasData: boolean;
   bins: ReliabilityBin[];
   // Diagnostics: the Brier a monotone rescale can reach (the floor), where residual
@@ -201,6 +215,11 @@ export interface Calibration {
   // the graded event (CISA catalogues the CVE) is narrower than the modelled one (an
   // attacker traverses this hop), so its level must not be read as advice.
   edge?: Calibration | null;
+  // Whether this track's own score orders confirmed verdicts above refuted ones.
+  discrimination?: Discrimination | null;
+  // Whether the triage ORDER (Priority) does - the ranking an operator works through.
+  // Null until a verdict carries a Priority captured when it was recorded.
+  priorityDiscrimination?: Discrimination | null;
 }
 
 // One sample of the calibration trend: the headline numbers at a point in time, so a
@@ -485,6 +504,8 @@ const dashboardQuery = (app?: string) => {
       brierRecalibrated diagnosis persistent
       segments { name samples brier ece meanPredicted observedRate verdict }
       detection { tested detected detectionRate highScoreTested highScoreDetectionRate }
+      discrimination { positives negatives auc aucLow aucHigh verdict hasData }
+      priorityDiscrimination { positives negatives auc aucLow aucHigh verdict hasData }
       edge { samples brier ece meanPredicted observedRate verdict hasData
              bins { low high count meanPredicted observedRate } }
     }
@@ -577,6 +598,9 @@ export function hasRuntimeToken(): boolean {
 export interface AuthConfig {
   authRequired: boolean;
   mode: "none" | "token" | "oidc" | "both";
+  // Present only when the deployment lets a credential-less caller in on purpose
+  // (API_ANONYMOUS_ROLE): a published read-only instance, not an open one.
+  anonymousRole?: string;
   oidc?: {
     issuer?: string;
     audience?: string;
@@ -592,6 +616,46 @@ export async function fetchAuthConfig(): Promise<AuthConfig> {
   const res = await fetch("/auth/config", { headers: { Accept: "application/json" } });
   if (!res.ok) throw new Error(`auth config: ${res.status}`);
   return res.json();
+}
+
+// Me is GET /auth/me: what this tab's credential resolved to, and whether the server would
+// accept a write from it.
+export interface Me {
+  // "token:<fingerprint>", "jwt:<sub>" or "anonymous" - the audit log's name for the caller.
+  subject: string;
+  // viewer | operator | admin; absent when the API has no authentication at all.
+  role?: string;
+  tenant: string;
+  apps?: string[];
+  // No credential was presented: an open instance, or a visitor to a published one.
+  anonymous: boolean;
+  canWrite: boolean;
+}
+
+// CredentialRejected is a 401 from /auth/me: the token this tab holds is wrong, expired or
+// revoked. Distinct from every other failure, which says nothing about the credential.
+export class CredentialRejected extends Error {}
+
+// fetchMe returns null when the answer is unknown - a backend older than /auth/me, or a
+// network failure - so the caller keeps its best guess instead of treating it as a verdict.
+export async function fetchMe(): Promise<Me | null> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const token = authToken();
+  if (token) headers.Authorization = `Bearer ${token}`;
+  let res: Response;
+  try {
+    res = await fetch("/auth/me", { headers });
+  } catch {
+    return null;
+  }
+  if (res.status === 401) throw new CredentialRejected("credential not accepted");
+  if (!res.ok) return null;
+  try {
+    return (await res.json()) as Me;
+  } catch {
+    // An unproxied path falls through to the SPA and answers index.html with a 200.
+    return null;
+  }
 }
 
 // signOut drops the local credential and, for SSO, performs an RP-initiated

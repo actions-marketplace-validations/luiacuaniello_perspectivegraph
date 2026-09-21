@@ -1,6 +1,67 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { fetchAuthConfig, authToken, setAuthToken, type AuthConfig } from "../api/client";
+import {
+  fetchAuthConfig,
+  fetchMe,
+  authToken,
+  setAuthToken,
+  clearAuthToken,
+  hasRuntimeToken,
+  CredentialRejected,
+  type AuthConfig,
+  type Me,
+} from "../api/client";
 import { beginPkceLogin, completePkceLogin, randomString } from "../auth/pkce";
+import { AlertTriangleIcon, InfoIcon } from "./icons";
+import { ReadOnlyContext, writeRestriction } from "../auth/readOnly";
+
+// OpenInstanceBanner is the only place an unauthenticated instance says so to a human.
+// The backend logs a warning at startup and /auth/config reports authRequired: false, but
+// a log scrolls past and an endpoint is not read by whoever opens the page - so an install
+// exposed by accident looked exactly like one exposed on purpose.
+//
+// It is deliberately not dismissible. The Helm chart refuses to publish an install without
+// a credential, but it can only see exposure arranged through the chart: a patched Service
+// or a hand-written Ingress is invisible to it, and this banner is what covers that gap. A
+// signal that can be clicked away does not cover it.
+//
+// It shows in `make demo` too, which runs open by design. That is the point rather than a
+// side effect: the demo is where someone learns this is open until they configure it.
+function OpenInstanceBanner() {
+  return (
+    <div
+      role="alert"
+      className="flex shrink-0 items-center gap-2 border-b border-flag/25 bg-flag-soft px-4 py-2 text-xs text-flag"
+    >
+      <AlertTriangleIcon className="size-3.5 shrink-0" />
+      <span>
+        <strong className="font-semibold">This instance requires no credential.</strong>{" "}
+        Anyone who can reach it can read these attack paths and post to the ingest endpoint.
+        Set <code>API_TOKENS</code> or <code>OIDC_JWKS_URL</code>, and{" "}
+        <code>INGEST_HMAC_SECRET</code>, before exposing it.
+      </span>
+    </div>
+  );
+}
+
+// ReadOnlyNotice replaces the alarm on an instance published read-only on purpose. It
+// reports authRequired false exactly like an open one, but its writes answer 403 and its
+// ingestion is not exposed - so the alarm's claims would be false there, and the visitor
+// it would reach is the one person who can do nothing about them. What that visitor does
+// need to know is why a suppress or a verdict is refused.
+function ReadOnlyNotice() {
+  return (
+    <div
+      role="status"
+      className="flex shrink-0 items-center gap-2 border-b border-edge/70 bg-panel px-4 py-2 text-xs text-muted"
+    >
+      <InfoIcon className="size-3.5 shrink-0" />
+      <span>
+        <strong className="font-semibold text-slate-700">Read-only instance.</strong> Explore every attack
+        path freely; changes such as suppressions, verdicts and tickets are turned off.
+      </span>
+    </div>
+  );
+}
 
 // LoginGate fronts the dashboard with a runtime login when the API requires auth.
 // It reads GET /auth/config (public) to learn the mode, so the same build works
@@ -16,8 +77,16 @@ export default function LoginGate({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [authed, setAuthed] = useState(false);
   const [config, setConfig] = useState<AuthConfig | null>(null);
+  // Whether /auth/config actually answered. A failed fetch falls back to "open" so the
+  // dashboard still renders, but it is not evidence that the instance IS open - and
+  // claiming so on a network blip would teach people to ignore the banner.
+  const [configKnown, setConfigKnown] = useState(false);
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // Who the credential resolved to (GET /auth/me). Null until it answers, and for good on a
+  // backend that predates it - the read-only decision then falls back to what
+  // /auth/config alone can tell.
+  const [me, setMe] = useState<Me | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -46,11 +115,14 @@ export default function LoginGate({ children }: { children: ReactNode }) {
         /* malformed return URL - ignore and fall through to the gate */
       }
 
-      const c = await fetchAuthConfig().catch(
-        () => ({ authRequired: false, mode: "none" }) as AuthConfig,
-      );
+      let known = true;
+      const c = await fetchAuthConfig().catch(() => {
+        known = false;
+        return { authRequired: false, mode: "none" } as AuthConfig;
+      });
       if (!alive) return;
       setConfig(c);
+      setConfigKnown(known);
       setAuthed(!c.authRequired || !!authToken());
       setReady(true);
     }
@@ -61,8 +133,53 @@ export default function LoginGate({ children }: { children: ReactNode }) {
     };
   }, []);
 
+  // Ask who we are once the dashboard is let through. A token used to be taken on trust:
+  // anything pasted opened the dashboard, which then failed every request with a 401 and
+  // counted each poll toward the brute-force lockout. Now a rejected credential is dropped
+  // and the gate comes back saying so.
+  useEffect(() => {
+    if (!ready || !authed) return;
+    let alive = true;
+    fetchMe()
+      .then((m) => {
+        if (alive) setMe(m);
+      })
+      .catch((e) => {
+        // Only a credential this tab supplied can be withdrawn here; a build-time token
+        // would come straight back, and asking again would loop.
+        if (!alive || !(e instanceof CredentialRejected) || !hasRuntimeToken()) return;
+        clearAuthToken();
+        if (config?.authRequired) {
+          setError("That credential was not accepted. It may be mistyped, expired or revoked.");
+          setAuthed(false);
+        } else {
+          // A published instance: without the token this tab is an ordinary visitor.
+          window.location.reload();
+        }
+      });
+    return () => {
+      alive = false;
+    };
+  }, [ready, authed, config]);
+
   if (!ready) return null;
-  if (authed || !config) return <>{children}</>;
+  if (authed || !config) {
+    const open = configKnown && config !== null && !config.authRequired;
+    const published = open && !!config?.anonymousRole;
+    // The notice and the app share the screen's height instead of adding up to more than
+    // it. The app fills 100% of what it is given; beside a banner that made the page taller
+    // than the window, so a phone scrolled the whole document by the banner's height on top
+    // of each view's own scrolling - and the bottom tab bar rode over a page that moved.
+    return (
+      <ReadOnlyContext.Provider value={writeRestriction(me, published && !authToken())}>
+        <div className="flex h-full flex-col">
+          {open && !published && <OpenInstanceBanner />}
+          {published && <ReadOnlyNotice />}
+          <div className="min-h-0 flex-1">{children}</div>
+        </div>
+      </ReadOnlyContext.Provider>
+    );
+  }
 
   const oidc = config.oidc;
   const ssoAvailable = !!(oidc && oidc.authorizeUrl && oidc.clientId);
@@ -74,6 +191,8 @@ export default function LoginGate({ children }: { children: ReactNode }) {
       return;
     }
     setAuthToken(t);
+    setMe(null);
+    setError(null);
     setAuthed(true);
   };
 
@@ -116,7 +235,7 @@ export default function LoginGate({ children }: { children: ReactNode }) {
         )}
 
         {ssoAvailable && (
-          <div className="my-4 flex items-center gap-3 text-[11px] uppercase tracking-wide text-slate-400">
+          <div className="my-4 flex items-center gap-3 text-[12px] uppercase tracking-wide text-slate-400">
             <span className="h-px flex-1 bg-edge" />
             or use a token
             <span className="h-px flex-1 bg-edge" />
@@ -144,7 +263,7 @@ export default function LoginGate({ children }: { children: ReactNode }) {
           Continue
         </button>
 
-        <p className="mt-4 text-[11px] leading-relaxed text-slate-400">
+        <p className="mt-4 text-[12px] leading-relaxed text-slate-400">
           The token is stored only in this tab (sessionStorage) and sent as a Bearer credential. It is never
           written to disk or the bundle.
         </p>

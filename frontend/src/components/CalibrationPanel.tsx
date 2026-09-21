@@ -1,5 +1,6 @@
 import { type Calibration, type CalibrationTrendPoint } from "../api/client";
 import InfoTip from "./InfoTip";
+import { DiscriminationRow } from "./DiscriminationRow";
 
 // Sparkline draws a tiny trend line for a numeric series, normalized to its own
 // range so the shape (up/down) reads at a glance even when values are close.
@@ -31,6 +32,9 @@ function Sparkline({ values, tone }: { values: number[]; tone: string }) {
 // green when scores match reality, red/amber when they don't.
 const VERDICT_STYLE: Record<string, { label: string; cls: string }> = {
   "well-calibrated": { label: "well-calibrated", cls: "bg-emerald-500/15 text-emerald-700" },
+  // The mean agrees and the bins do not: not a success to colour green, and not the absence
+  // of data either - without its own entry it would fall back to "insufficient data".
+  "calibrated-on-average": { label: "calibrated on average", cls: "bg-amber-500/15 text-amber-700" },
   overconfident: { label: "overconfident", cls: "bg-red-500/15 text-flag" },
   underconfident: { label: "underconfident", cls: "bg-amber-500/15 text-amber-700" },
   "insufficient-data": { label: "insufficient data", cls: "bg-slate-400/15 text-slate-500" },
@@ -69,8 +73,8 @@ function ReliabilityDiagram({ bins }: { bins: Calibration["bins"] }) {
           />
         </g>
       ))}
-      <text x={(L + R) / 2} y={188} textAnchor="middle" fontSize={9} fill="rgb(var(--c-muted))">predicted</text>
-      <text x={10} y={(T + B) / 2} textAnchor="middle" fontSize={9} fill="rgb(var(--c-muted))" transform={`rotate(-90 10 ${(T + B) / 2})`}>observed</text>
+      <text x={(L + R) / 2} y={188} textAnchor="middle" fontSize={11} fill="rgb(var(--c-muted))">predicted</text>
+      <text x={10} y={(T + B) / 2} textAnchor="middle" fontSize={11} fill="rgb(var(--c-muted))" transform={`rotate(-90 10 ${(T + B) / 2})`}>observed</text>
     </svg>
   );
 }
@@ -78,17 +82,19 @@ function ReliabilityDiagram({ bins }: { bins: Calibration["bins"] }) {
 function Stat({ label, value, tone = "text-slate-700" }: { label: string; value: string; tone?: string }) {
   return (
     <div>
-      <div className="text-[10px] font-semibold uppercase tracking-[0.14em] text-muted">{label}</div>
+      <div className="text-[12px] font-semibold uppercase tracking-[0.14em] text-muted">{label}</div>
       <div className={`mt-0.5 text-[15px] font-semibold tabular-nums ${tone}`}>{value}</div>
     </div>
   );
 }
 
 // diagTone colours the gate diagnosis: green when calibrated, blue when a rescale
-// fixes it, amber when a new model/axis is indicated.
+// fixes it, red when the order points the wrong way (the same red as an inverted Score
+// order, so the two lines agree at a glance), amber when a new model/axis is indicated.
 function diagTone(d: string): string {
   if (d.startsWith("calibrated")) return "text-emerald-600";
   if (d.startsWith("recalibrate")) return "text-accent";
+  if (d.startsWith("inverted")) return "text-flag";
   return "text-amber-600";
 }
 
@@ -108,20 +114,20 @@ export function CalibrationPanel({ calibration, trend }: { calibration: Calibrat
   return (
     <div className="rounded-2xl glass p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
-        <span className="flex items-center gap-1.5 text-[11px] font-medium text-muted">
+        <span className="flex items-center gap-1.5 text-[12px] font-medium text-muted">
           Calibration
           <InfoTip text="Whether the scores hold up: each tested path's predicted score vs its real red-team/BAS outcome. Brier and ECE are the error (lower is better); the diagram plots predicted vs observed." />
         </span>
         <div className="flex items-center gap-1.5">
           {ephemeral && (
             <span
-              className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-700"
+              className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[12px] font-semibold text-amber-700"
               title="The verdict store is in-memory: this calibration dataset is lost on restart. Set VALIDATIONS_PATH to persist it for a real calibration program."
             >
               in-memory
             </span>
           )}
-          <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${v.cls}`}>{v.label}</span>
+          <span className={`rounded-full px-2 py-0.5 text-[12px] font-semibold ${v.cls}`}>{v.label}</span>
         </div>
       </div>
       {/* The diagram gets a column sized to itself rather than half the panel, and the
@@ -143,11 +149,11 @@ export function CalibrationPanel({ calibration, trend }: { calibration: Calibrat
           </div>
           {brierSeries.length >= 2 && (
             <div className="flex items-center gap-3 border-t border-edge/60 pt-3">
-              <span className="shrink-0 text-[10px] uppercase tracking-wide text-muted">Brier over time</span>
+              <span className="shrink-0 text-[12px] uppercase tracking-wide text-muted">Brier over time</span>
               <div className="h-6 max-w-[260px] flex-1">
                 <Sparkline values={brierSeries} tone="rgb(var(--c-accent))" />
               </div>
-              <span className="shrink-0 text-[10px] tabular-nums text-muted">
+              <span className="shrink-0 text-[12px] tabular-nums text-muted">
                 {brierSeries.length} passes · now {calibration.brier.toFixed(3)}
               </span>
             </div>
@@ -155,19 +161,24 @@ export function CalibrationPanel({ calibration, trend }: { calibration: Calibrat
         </div>
       </div>
 
+      <DiscriminationRow
+        discrimination={calibration.discrimination}
+        priorityDiscrimination={calibration.priorityDiscrimination}
+      />
+
       {(calibration.diagnosis || (calibration.segments?.length ?? 0) > 0 || calibration.detection) && (
         <div className="mt-3 border-t border-edge/60 pt-3">
           {calibration.diagnosis && (
             <div className="flex items-start gap-2">
-              <span className="mt-0.5 text-[11px] font-medium text-muted">Diagnosis</span>
+              <span className="mt-0.5 text-[12px] font-medium text-muted">Diagnosis</span>
               <span className={`flex-1 text-[12px] leading-snug ${diagTone(calibration.diagnosis)}`}>{calibration.diagnosis}</span>
-              <InfoTip text="The gate recommendation: recalibrate-first (a rescale fixes it), structural #6 (error on correlated/long paths), detection-axis #7 (paths get caught, so the score over-predicts), or low-resolution (inputs can't tell real from fake)." />
+              <InfoTip text="The gate recommendation: recalibrate-first (a rescale fixes it), structural #6 (error on correlated/long paths), detection-axis #7 (paths get caught, so the score over-predicts), per-basis (one evidence source runs hot, another cold), low-resolution (inputs can't tell real from fake), or inverted-order (refuted paths outrank confirmed ones). Whatever it says about the ranking comes from the Score order line above, with its AUC." />
             </div>
           )}
           <div className="mt-2 flex flex-wrap items-center gap-1.5">
             {calibration.brierRecalibrated != null && (
               <span
-                className="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[10px] tabular-nums text-slate-600"
+                className="rounded-md bg-slate-500/10 px-1.5 py-0.5 text-[12px] tabular-nums text-slate-600"
                 title="Brier after isotonic recalibration - the best a rescale can reach. Near the raw Brier: recalibration won't help. Much lower: apply the map."
               >
                 recalibrated Brier {calibration.brierRecalibrated.toFixed(3)}
@@ -180,7 +191,7 @@ export function CalibrationPanel({ calibration, trend }: { calibration: Calibrat
                 return (
                   <span
                     key={s.name}
-                    className={`rounded-md px-1.5 py-0.5 text-[10px] font-medium ${sv.cls}`}
+                    className={`rounded-md px-1.5 py-0.5 text-[12px] font-medium ${sv.cls}`}
                     title={`${s.samples} samples · predicted ${pct(s.meanPredicted)} vs observed ${pct(s.observedRate)}`}
                   >
                     {s.name} · {sv.label}

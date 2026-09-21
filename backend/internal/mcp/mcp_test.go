@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -164,6 +165,61 @@ func TestToolsSpeakToTheModelAboutTrust(t *testing.T) {
 				t.Errorf("tool %q mutates state; the MCP surface is read-only by design", tl.Name)
 			}
 		}
+	}
+}
+
+// A description is the whole of what a model knows about a tool, and it is assembled from
+// Go string literals - so a quote closed in the wrong place ships source code to the
+// model. routes_to_target told every agent "Answers 'how many ways in ' +'are there, ...".
+// Walks the input schemas too: argument descriptions reach the model the same way.
+func TestToolDescriptionsCarryNoConcatenationDebris(t *testing.T) {
+	debris := regexp.MustCompile(`['"]\s*\+|\+\s*['"]`)
+	var walk func(tool, where string, v any)
+	walk = func(tool, where string, v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, child := range x {
+				if s, ok := child.(string); ok && k == "description" {
+					if m := debris.FindString(s); m != "" {
+						t.Errorf("%s %s description carries %q from its Go source: %s", tool, where, m, s)
+					}
+				}
+				walk(tool, where+"."+k, child)
+			}
+		case []any:
+			for _, child := range x {
+				walk(tool, where, child)
+			}
+		}
+	}
+	for _, tl := range Tools(NewAPI("http://example.invalid", "")) {
+		if m := debris.FindString(tl.Description); m != "" {
+			t.Errorf("%s description carries %q from its Go source: %s", tl.Name, m, tl.Description)
+		}
+		walk(tl.Name, "inputSchema", tl.InputSchema)
+	}
+}
+
+// A parameter without a description is a guess the model has to make: what `k` counts,
+// whether `from` wants an id or a name. MCP directories grade servers on exactly this, and
+// four parameters here had none. Nested schemas count - the fields of each simulate_fix cut
+// are what the model fills in.
+func TestEveryToolParameterIsDescribed(t *testing.T) {
+	var walk func(tool, where string, schema map[string]any)
+	walk = func(tool, where string, schema map[string]any) {
+		props, _ := schema["properties"].(map[string]any)
+		for name, raw := range props {
+			p, _ := raw.(map[string]any)
+			if d, _ := p["description"].(string); strings.TrimSpace(d) == "" {
+				t.Errorf("%s: parameter %s%s has no description", tool, where, name)
+			}
+			if items, ok := p["items"].(map[string]any); ok {
+				walk(tool, where+name+"[].", items)
+			}
+		}
+	}
+	for _, tl := range Tools(NewAPI("http://example.invalid", "")) {
+		walk(tl.Name, "", tl.InputSchema)
 	}
 }
 
