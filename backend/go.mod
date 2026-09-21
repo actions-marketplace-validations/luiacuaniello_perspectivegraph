@@ -6,16 +6,16 @@ toolchain go1.26.8
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.47.0
-	github.com/aws/aws-sdk-go-v2/config v1.33.4
-	github.com/aws/aws-sdk-go-v2/credentials v1.20.4
-	github.com/aws/aws-sdk-go-v2/service/ec2 v1.332.0
+	github.com/aws/aws-sdk-go-v2/config v1.33.5
+	github.com/aws/aws-sdk-go-v2/credentials v1.20.5
+	github.com/aws/aws-sdk-go-v2/service/ec2 v1.335.0
 	github.com/aws/aws-sdk-go-v2/service/iam v1.64.0
-	github.com/aws/aws-sdk-go-v2/service/sts v1.50.0
+	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/graphql-go/graphql v0.8.1
 	github.com/graphql-go/handler v0.2.4
 	github.com/lib/pq v1.12.3
-	github.com/nats-io/nats.go v1.53.1
+	github.com/nats-io/nats.go v1.54.0
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/time v0.16.0
 )
