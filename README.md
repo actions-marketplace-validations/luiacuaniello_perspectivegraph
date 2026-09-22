@@ -84,9 +84,9 @@ Prefer not to build? The release images are published to GHCR (`latest` also tra
 newest release; the pinned tag is the one to use if you care about reproducibility):
 
 ```bash
-docker pull ghcr.io/luiacuaniello/perspectivegraph:v1.17.0 # x-release-please-version
-docker pull ghcr.io/luiacuaniello/perspectivegraph-dashboard:v1.17.0 # x-release-please-version
-docker pull ghcr.io/luiacuaniello/perspectivegraph-postgres:v1.17.0 # x-release-please-version
+docker pull ghcr.io/luiacuaniello/perspectivegraph:v1.18.0 # x-release-please-version
+docker pull ghcr.io/luiacuaniello/perspectivegraph-dashboard:v1.18.0 # x-release-please-version
+docker pull ghcr.io/luiacuaniello/perspectivegraph-postgres:v1.18.0 # x-release-please-version
 ```
 
 On Kubernetes, the Helm chart is published the same way - no clone needed, and a version
@@ -97,7 +97,7 @@ people who wrote the software rather than a third party repackaging it:
 
 ```bash
 helm install perspectivegraph oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
-  --version 1.17.0 # x-release-please-version
+  --version 1.18.0 # x-release-please-version
 ```
 
 Images and chart are signed with cosign keyless and carry an SPDX SBOM plus a SLSA build
@@ -220,6 +220,18 @@ perspectivegraph gate -local -aws-region eu-west-1 \
   -report trivy.json -slug owner/name -sha "$COMMIT_SHA"
 ```
 
+Already running Trivy? The same gate installs as a Trivy plugin, so the answer arrives
+where the CVE list does:
+
+```bash
+trivy plugin install github.com/luiacuaniello/perspectivegraph
+trivy image -f json myapp:pr-42 | trivy perspectivegraph gate -local -aws-region eu-west-1 -report -
+```
+
+Run like that, it keeps the gate's exit codes. As an output plugin
+(`-o plugin=perspectivegraph --output-plugin-arg "gate ..."`) it works the same way, but
+Trivy folds every verdict other than clean into exit 1.
+
 > **Two things to settle before wiring it up.**
 >
 > **Fork pull requests.** The gate needs secrets, and GitHub gives a fork's `pull_request`
@@ -307,7 +319,7 @@ spelled out in [positioning](docs/POSITIONING.md). It collects **no telemetry**:
 it opens no outbound connection at all - GitHub, the AI assistant and the KEV/EPSS feeds each
 stay dark until you set a key or a flag (`THREATINTEL` is `off` by default).
 
-**What is measured today, as of v1.17.0.** <!-- x-release-please-version --> Two things, both
+**What is measured today, as of v1.18.0.** <!-- x-release-please-version --> Two things, both
 reproducible without taking anyone's word for them.
 
 `make bench-cloudgoat` runs four [CloudGoat-shaped scenarios](backend/testdata/cloudgoat/README.md)
