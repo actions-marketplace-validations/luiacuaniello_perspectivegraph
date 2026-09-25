@@ -61,7 +61,8 @@ is signed with cosign and carries SLSA provenance, and two commands
 Add `-compare` and it also runs the engine over the same account, **exiting non-zero where the
 two disagree**. That is how the engine's
 [first real false positive](docs/MANUAL.md#the-engines-first-demonstrated-false-positive---found-then-closed)
-was found, and how it stays fixed. From here, [how to evaluate this](docs/EVALUATION.md) walks to a
+was found, and how it stays fixed. If it disagrees on yours,
+[report it](https://github.com/luiacuaniello/perspectivegraph/issues/new?template=engine-vs-aws.yml): no report is more useful. From here, [how to evaluate this](docs/EVALUATION.md) walks to a
 verdict on your own estate in stages that each end in an answer.
 
 ## See the whole engine in 90 seconds
@@ -81,7 +82,7 @@ On Kubernetes, the chart is an
 
 ```bash
 helm install perspectivegraph oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
-  --version 1.18.1 # x-release-please-version
+  --version 1.19.0 # x-release-please-version
 ```
 
 The chart and the three images it runs (`ghcr.io/luiacuaniello/perspectivegraph`, `-dashboard`
@@ -192,7 +193,7 @@ score as what the model believes and how sure it says it is, not as a measured f
 to find and cut routes; don't put its percentage in front of a board.
 [Positioning](docs/POSITIONING.md) spells out what is and isn't claimed.
 
-**What is measured today, as of v1.18.1.** <!-- x-release-please-version -->
+**What is measured today, as of v1.19.0.** <!-- x-release-please-version -->
 `make bench-cloudgoat` grades the engine in CI on four
 [CloudGoat-shaped scenarios](backend/testdata/cloudgoat/README.md):
 
