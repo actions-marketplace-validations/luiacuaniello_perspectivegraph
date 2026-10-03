@@ -433,7 +433,7 @@ jobs:
             echo "push=true" >>"${GITHUB_OUTPUT}"
           fi
 
-      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+      - uses: oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4 # v2.0.2
         if: steps.ahmeta.outputs.push == 'true'
       - name: Push the Artifact Hub repository metadata
         if: steps.ahmeta.outputs.push == 'true'
