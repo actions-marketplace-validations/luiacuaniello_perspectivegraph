@@ -61,8 +61,9 @@ backend:
   analyzerIncremental: false
   # Attacker-profile mixture: the path score is also marginalized over a latent
   # attacker capability (commodity/criminal/apt) - Σ P(c)·∏ p(e|c) - for a per-profile
-  # breakdown. Retune the threat-model priors (names match the built-ins; renormalized).
-  # Empty keeps the defaults (commodity:0.5,criminal:0.35,apt:0.15).
+  # breakdown, anchored so each hop keeps its own probability on average (the priors set
+  # the spread between profiles, not the level). Retune the threat-model priors (names
+  # match the built-ins; renormalized). Empty keeps the defaults (commodity:0.5,criminal:0.35,apt:0.15).
   attackerProfilePriors: ""
   # EPSS -> conditional-traversal map: p(traverse|positioned) = EPSS^gamma. EPSS is a
   # marginal 30-day rate, not the conditional a positioned attacker needs; gamma < 1
@@ -154,12 +155,75 @@ postgres:
   sslMode: ""
   auth:
     user: perspective
-    password: perspective
+    # Empty: the bundled Postgres gets a random password, generated on install and kept
+    # across upgrades - an existing install keeps the one it has (Postgres only reads it
+    # when it first initialises its data directory, so a new one would lock the backend
+    # out). It used to default to "perspective", the same on every install. Rendering
+    # with `helm template` (Argo CD, Flux) cannot read the cluster and would draw a new
+    # one each time: set it there, or use secrets.existingSecret. Required for an
+    # external Postgres.
+    password: ""
     database: perspectivegraph
   persistence:
     enabled: true
     size: 5Gi
     storageClass: ""
+  # PostgreSQL run by the CloudNativePG operator, for a production database inside the
+  # cluster: a primary with streaming replicas and automatic failover, TLS the backend
+  # verifies (sslmode verify-full against the operator's CA), and - with the Barman Cloud
+  # plugin - continuous backups to object storage with point-in-time recovery. It is what
+  # the bundled pod above is not, and the answer on AWS and GCP, whose managed PostgreSQL
+  # services do not offer Apache AGE.
+  #
+  # Install the operator first, once per cluster (https://cloudnative-pg.io); the chart
+  # creates a Cluster resource and refuses to render without the API to receive it. When
+  # enabled, the bundled pod is not deployed whatever postgres.enabled says, and the
+  # backend connects as auth.user to auth.database with the password the operator
+  # generates (Secret <release>-perspectivegraph-pg-app) - auth.password is not used.
+  # docs/manual/kubernetes.md walks through it.
+  cloudnativepg:
+    enabled: false
+    # 1 primary + (instances - 1) replicas. 2 survives the loss of a node; 3 keeps a
+    # replica while one is being rebuilt.
+    instances: 2
+    # The database image. Empty repository and tag: the same image as the bundled
+    # database above - PostgreSQL 17 + Apache AGE 1.7.0 on Alpine, rebuilt every release at
+    # zero findings. The operator does not need its own Debian images, only the PostgreSQL
+    # binaries on the PATH; it runs this one as its postgres user, uid and gid 999. To run
+    # another build - one of the operator's images with AGE added, say - set repository and
+    # tag, and the uid and gid its postgres user has (26 in the operator's images).
+    image:
+      repository: "" # empty = postgres.image.repository
+      tag: "" # empty = postgres.image.tag, then the chart's appVersion
+      # The PostgreSQL major version inside the image. The operator needs it stated - it
+      # will not guess it from a release tag - and refuses to change it on a running
+      # cluster, since a major upgrade is a data migration. Change it only with an image
+      # built for that version.
+      major: 17
+      uid: 999
+      gid: 999
+    storage:
+      size: 10Gi
+      storageClass: "" # empty = the cluster's default StorageClass
+    resources: {}
+    # Extra PostgreSQL parameters, e.g. { max_connections: "200" }. age is added to
+    # shared_preload_libraries by the chart; the backend needs it preloaded because its
+    # role is not a superuser and cannot LOAD the library itself.
+    parameters: {}
+    # Where the operator runs. With networkPolicy.enabled, only the operator (status port),
+    # the cluster's own instances (replication) and the backend may reach the database.
+    operatorNamespace: cnpg-system
+    # Annotations for the service account the database pods run as - on EKS, the IAM role
+    # the backups write to S3 with: { eks.amazonaws.com/role-arn: arn:aws:iam::…:role/… }.
+    serviceAccountAnnotations: {}
+    backup:
+      # The name of a barmancloud.cnpg.io/v1 ObjectStore in this namespace: the bucket,
+      # and how to authenticate to it. Empty: no backups - which is not a production
+      # database. Needs the Barman Cloud plugin installed next to the operator.
+      objectStore: ""
+      # A full base backup on this schedule (six-field cron: seconds first); the WAL is
+      # archived continuously in between, so a restore can stop at any moment.
+      schedule: "0 0 3 * * *"
 
 # In-cluster NATS JetStream (event bus). To bring your own set enabled=false
 # and point externalUrl at it (e.g. nats://my-nats.internal:4222, or tls://… with
@@ -171,12 +235,31 @@ nats:
   # That userland was twenty of this image's twenty-three findings, two of them high; what
   # is left is the binary itself. A broker reachable from every workload in the namespace
   # is a poor place to keep a shell and a package manager it never uses.
-  image: nats:2.15.0-scratch@sha256:c0d27f3054601a99055aa5ec897b0a55bf1869ae50f454e659acfbbea11d2ab7
+  image: nats:2.15.1-scratch@sha256:3af42719041e578167e4f14c67a01d2fdc3c2ee4a228ca8315c6c0e18e15fdac
   stream: PERSPECTIVE
   subject: perspective.events.*
   # How long an event may wait unprocessed, and how long a dead-lettered one is kept.
   # A handled event leaves the stream at once; this bounds a backlog, not a history.
   maxAge: 168h
+  # Clients authenticate. Without it any workload that can reach port 4222 publishes
+  # events straight onto the bus - past the ingest webhook's signature check - or deletes
+  # the stream. The bundled server requires this user; the backend presents it. Empty
+  # password: generated on install, kept in a Secret across upgrades (with `helm
+  # template` - Argo CD, Flux - set it, or existingSecret, as for postgres.auth.password).
+  # existingSecret: a Secret of yours with key NATS_PASSWORD. For an external NATS the
+  # backend sends credentials only when user and password (or existingSecret) are set.
+  # After changing the password, restart NATS and the backend.
+  auth:
+    enabled: true
+    user: perspectivegraph
+    password: ""
+    existingSecret: ""
+  # The stream on a volume, so queued events, dead letters and the ingest-batch record
+  # survive a NATS restart. Off means an emptyDir: a restart loses them.
+  persistence:
+    enabled: true
+    size: 2Gi
+    storageClass: ""
   # App-level TLS to a TLS-enabled NATS (typically external; use a tls:// URL).
   # secretName references a Secret with ca.crt (+ tls.crt/tls.key for mutual TLS);
   # it's mounted and the backend trusts the CA / presents the client cert.
@@ -196,6 +279,10 @@ opensearch:
 # "owner/*". REQUIRED for any real write - the destination otherwise comes from
 # an ingested node property, so an empty list refuses every write.
 repoAllowlist: []
+# Which critical paths the commit status and PR/MR comments count against a commit:
+# diff = the routes the change opened or made likelier (the merge gate's rule);
+# commit = every route through an asset stamped with it (before 1.22).
+prAttribution: diff
 
 github:
   token: ""
@@ -229,6 +316,17 @@ connectors:
   azure:
     mode: fixtures
     fixturesDir: ""
+  # Reads the cluster the chart is installed in ("kubernetes" in enabled): the chart binds
+  # a ClusterRole to the backend's service account granting get/list on what the k8s
+  # collector reads - pods, services, service accounts, nodes, ingresses, roles and their
+  # bindings, and EKS's aws-auth map - never secrets, and mounts that account's token in
+  # the backend alone. clusterName is required; on EKS, the EKS cluster's name. awsAccount,
+  # on EKS, is the account the nodes run in.
+  kubernetes:
+    mode: incluster
+    clusterName: ""
+    awsAccount: ""
+    fixturesDir: ""
 
 # AI-native layer. apiKey (Anthropic/Claude) is the preferred backend and enables
 # /ai/* (NL query, exec summary, path explain). hf.* is the free, OpenAI-compatible
@@ -255,6 +353,7 @@ scrubIngest: true
 # At-rest encryption of the file-backed governance stores + detached signatures
 # on graph exports. Both are secrets; empty ⇒ plaintext on disk / unsigned
 # exports. Generate with e.g. --set crypto.storeEncryptionKey="$(openssl rand -hex 32)".
+# A passphrase instead of 64 hex characters is refused with backend.env: production.
 crypto:
   storeEncryptionKey: ""
   exportSigningKey: ""
@@ -275,6 +374,34 @@ ticket:
 secrets:
   create: true
   existingSecret: ""
+  # Fill every credential left empty with a generated one, kept across upgrades: an admin
+  # API token (unless OIDC is set), the ingest HMAC secret, the at-rest encryption key and
+  # the export signing key. It is what lets `helm install -f values-production.yaml` start
+  # without a Secret prepared by hand - add --set secrets.existingSecret="" so the chart
+  # creates its own, and postgres.auth.password, which only an external database knows
+  # (under postgres.cloudnativepg the operator generates it). The release notes say how to
+  # read them back.
+  #
+  # Only for `helm install` and `helm upgrade`, which can read the Secret they wrote. A
+  # render without the cluster - `helm template`, Argo CD, Flux - draws new values every
+  # time, and a new encryption key leaves the encrypted stores unreadable: there, keep the
+  # credentials in secrets.existingSecret instead.
+  generate: false
+
+# The backend's service account. Its own by default, holding no Kubernetes API token, so
+# that a cloud role can be bound to the backend and nothing else - on EKS, the read-only
+# IAM role the AWS connector reads the account with:
+#   EKS Pod Identity: aws eks create-pod-identity-association --cluster-name <cluster>
+#     --namespace <namespace> --service-account <release>-perspectivegraph-backend
+#     --role-arn <role>
+#   IRSA:             annotations: { eks.amazonaws.com/role-arn: <role> }
+# deploy/aws has the role, as CloudFormation and as Terraform.
+serviceAccount:
+  create: true
+  # Empty: <release>-perspectivegraph-backend when created, the namespace's default
+  # otherwise.
+  name: ""
+  annotations: {}
 
 # A default install is UNAUTHENTICATED - acceptable only inside a trusted cluster
 # for a demo. PerspectiveGraph is a map of how to attack the org, so for ANY
@@ -322,7 +449,8 @@ auth:
     # people; startup logs a warning either way.
     defaultRole: ""
     # Claim names, for directories that namespace them (Auth0, Entra). Empty keeps
-    # role / groups / tenant / apps.
+    # role / groups / tenant / apps. With a tenant besides the default configured, a
+    # token without the tenant claim is refused.
     roleClaim: ""
     groupsClaim: ""
     tenantClaim: ""
@@ -338,10 +466,9 @@ auth:
 ingest:
   hmacSecret: ""
   hmacSecrets: ""
-  # Keep accepting v1 signatures (the body alone), so no sender breaks on upgrade. Set
-  # false once every sender signs v2: a v1 request can be replayed, and its commit
-  # parameters changed.
-  hmacAcceptV1: true
+  # Accept v1 signatures (the body alone). Off: a v1 request can be replayed, and its
+  # commit parameters changed. Turn it on only for a sender that cannot sign v2 yet.
+  hmacAcceptV1: false
 
 # Durable governance state. The suppression / ticket / red-team-validation /
 # posture-history / audit-log stores are file-backed and single-writer; without a
@@ -411,6 +538,25 @@ containerSecurityContext:
 # paths. Empty ⇒ disabled. Example: "168h" (7 days).
 graph:
   ttl: ""
+  # Complete snapshots (GRAPH_SWEEP): a source that describes a scope in full - an
+  # image scan, an AWS account pull, an ingest sent with ?snapshot= - retracts what it
+  # no longer lists, and an element nobody asserts any more leaves the graph. false
+  # keeps everything until ttl, as before 1.23.
+  sweep: true
+
+# NetworkPolicy: the bundled Postgres and NATS accept connections from the backend only.
+# Off by default because it does nothing on a CNI that does not enforce it and breaks
+# whatever else talked to them (a backup job - add it to postgresFrom); on in
+# values-production.yaml. backendFrom, when set, also limits who may call the backend's
+# API and ingest ports to the dashboard plus these peers - typically the ingress
+# controller's namespace:
+#   backendFrom:
+#     - namespaceSelector:
+#         matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
+networkPolicy:
+  enabled: false
+  postgresFrom: []
+  backendFrom: []
 
 ingress:
   enabled: false
@@ -421,6 +567,13 @@ ingress:
   allowUnauthenticated: false
   className: ""
   annotations: {}
+  # The largest request body the ingress passes on. /ingest and /gate take scanner reports,
+  # which the backend accepts up to 32 MiB; the nginx-based controllers refuse anything
+  # over 1 MiB by default, so a real report would get a 413 before reaching the engine.
+  # Rendered as the body-size annotation of ingress-nginx and of F5 NGINX; other
+  # controllers ignore it (set theirs in annotations). An annotation you set yourself
+  # wins. Empty leaves the controller's default.
+  maxBodySize: 32m
   host: perspectivegraph.local
   # TLS termination at the ingress (recommended way to serve HTTPS). Set
   # tls.enabled and a secretName holding the cert - typically issued automatically

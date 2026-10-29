@@ -6,10 +6,14 @@
 # toolchain under QEMU would produce the same static binary far slower - and emulation is
 # not merely slow: `npm ci` under QEMU/arm64 died with SIGILL and hung a release build for
 # three hours (see frontend/Dockerfile). Nothing here needs to run on the target.
-FROM --platform=$BUILDPLATFORM golang:1.26.8-alpine@sha256:ce864e7223ac17b1775e6fd0b4c0db580c2eb50e7953a427916379e4b92a1628 AS build
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
 # Supplied by buildx per target image; defaulted so a plain `docker build` still works.
 ARG TARGETOS=linux
 ARG TARGETARCH
+# The release this image is, linked into the binary so that it can say so: in `version`,
+# in the first line of its log, in perspectivegraph_build_info, and to an MCP client. The
+# release workflow passes the tag; any other build leaves it empty and says "dev".
+ARG VERSION=""
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -19,9 +23,9 @@ COPY . .
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
-    go build -trimpath -ldflags="-s -w" -o /out/perspectivegraph ./cmd/perspectivegraph
+    go build -trimpath -ldflags="-s -w -X main.releaseVersion=${VERSION}" -o /out/perspectivegraph ./cmd/perspectivegraph
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
 COPY --from=build /out/perspectivegraph /perspectivegraph
 EXPOSE 8080 8081
 USER nonroot:nonroot

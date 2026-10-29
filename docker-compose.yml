@@ -49,7 +49,7 @@ services:
     <<: *hardening
     # -scratch: the nats-server binary and nothing else. That removed twenty of this
     # image's twenty-three findings, which were all in the Alpine userland it never used.
-    image: nats:2.15.0-scratch@sha256:c0d27f3054601a99055aa5ec897b0a55bf1869ae50f454e659acfbbea11d2ab7
+    image: nats:2.15.1-scratch@sha256:3af42719041e578167e4f14c67a01d2fdc3c2ee4a228ca8315c6c0e18e15fdac
     container_name: perspective-nats
     command: ["-js", "-m", "8222"]
     ports:
@@ -121,6 +121,10 @@ services:
       NATS_TLS_CA: ${NATS_TLS_CA:-}
       NATS_TLS_CERT: ${NATS_TLS_CERT:-}
       NATS_TLS_KEY: ${NATS_TLS_KEY:-}
+      # Credentials for a NATS that requires them (the bundled one here does not; it is
+      # bound to localhost). See .env.example.
+      NATS_USER: ${NATS_USER:-}
+      NATS_PASSWORD: ${NATS_PASSWORD:-}
       API_ADDR: ":8080"
       INGEST_ADDR: ":8081"
       # In-app TLS for the API + ingest servers. Empty (default) → plain HTTP,
@@ -149,6 +153,9 @@ services:
       # removed (leader-only) so departed assets can't produce phantom paths.
       # Empty/0 disables it (the default).
       GRAPH_TTL: ${GRAPH_TTL:-}
+      # Complete snapshots retract what their source no longer lists (a fixed CVE, a
+      # terminated instance). false keeps everything until GRAPH_TTL. See .env.example.
+      GRAPH_SWEEP: ${GRAPH_SWEEP:-true}
       # Set to http://opensearch:9200 when running with --profile search.
       OPENSEARCH_URL: ${OPENSEARCH_URL:-}
       THREATINTEL: ${THREATINTEL:-off}
@@ -259,6 +266,12 @@ services:
       AWS_ROLE_ARN: ${AWS_ROLE_ARN:-}
       AZURE_CONNECTOR_MODE: ${AZURE_CONNECTOR_MODE:-fixtures}
       AZURE_FIXTURES_DIR: ${AZURE_FIXTURES_DIR:-}
+      # The Kubernetes connector reads the cluster the backend runs in, so under Compose
+      # only its fixtures mode applies; a cluster is sent with `perspectivegraph ingest`.
+      K8S_CONNECTOR_MODE: ${K8S_CONNECTOR_MODE:-incluster}
+      K8S_CLUSTER_NAME: ${K8S_CLUSTER_NAME:-}
+      K8S_AWS_ACCOUNT: ${K8S_AWS_ACCOUNT:-}
+      K8S_FIXTURES_DIR: ${K8S_FIXTURES_DIR:-}
       # Dev workflow (GitHub): PR comment + merge-gate status + remediation-as-PR.
       # Empty token → dry-run (logged, not posted).
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
@@ -270,6 +283,9 @@ services:
       # separated. The destination otherwise comes from ingested graph data.
       # Empty ⇒ every real write is refused. See .env.example.
       REPO_ALLOWLIST: ${REPO_ALLOWLIST:-}
+      # diff: the commit status and PR comments count the routes a change opened or
+      # made likelier (the merge gate's rule); commit: every route through it.
+      PR_ATTRIBUTION: ${PR_ATTRIBUTION:-diff}
       # AI-native layer. Anthropic (Claude) is preferred; HuggingFace (HF_TOKEN,
       # OpenAI-compatible) is the free fallback used when no Anthropic key is set.
       # Empty for both → /ai/* disabled (self-gated).
@@ -302,7 +318,7 @@ services:
   # ── Optional full-text index: OpenSearch ────────────────────────────
   opensearch:
     <<: *hardening
-    image: opensearchproject/opensearch:3.7.0@sha256:123e6591a47b1d54686890551bdb35739c85193ecded381219fc9e059e18128f
+    image: opensearchproject/opensearch:3.8.0@sha256:fafe3fc3587088674669235575aa166228c48bdb940294a8cdbbc1da75236a40
     container_name: perspective-opensearch
     environment:
       - discovery.type=single-node
@@ -320,13 +336,13 @@ services:
   # Opt-in demo identity provider so you can exercise the dashboard's SSO login
   # gate end-to-end on a laptop, no cloud IdP needed:
   #   docker compose --profile app --profile sso up -d
-  # then set the backend OIDC_* env (the exact values are in docs/MANUAL.md, "Trying SSO
+  # then set the backend OIDC_* env (the exact values are in docs/manual/security.md, "Trying SSO
   # end-to-end on a laptop") and open
   # http://localhost:3000. Realm "demo", user demo/demo, client perspectivegraph.
   # Dev image/flags (start-dev, in-memory) - for local testing only, not production.
   keycloak:
     <<: *hardening
-    image: quay.io/keycloak/keycloak:26.4
+    image: quay.io/keycloak/keycloak:26.8@sha256:a78d6b79572168cb25886b80a8b5b8d4ed4390743e3eecb810538683e209dd6b
     container_name: perspective-keycloak
     command: ["start-dev", "--import-realm", "--http-port=8080"]
     environment:

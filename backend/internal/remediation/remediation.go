@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"github.com/luiacuaniello/perspectivegraph/internal/analyzer"
 	"github.com/luiacuaniello/perspectivegraph/pkg/ontology"
@@ -44,6 +45,12 @@ type Rule struct {
 	Build func(from, to ontology.Node) Suggestion
 }
 
+// isECSService reports whether a container node is an ECS service, which the network feed
+// marks with its cluster.
+func isECSService(n ontology.Node) bool {
+	return n.Label == ontology.LabelContainer && propStr(n, "ecs_cluster") != ""
+}
+
 func edgeIn(t ontology.EdgeType, set ...ontology.EdgeType) bool {
 	for _, s := range set {
 		if t == s {
@@ -56,10 +63,12 @@ func edgeIn(t ontology.EdgeType, set ...ontology.EdgeType) bool {
 // Registry is the ordered rule set Generate consults.
 var Registry = []Rule{
 	{
+		// A Kubernetes workload: a NetworkPolicy cuts it off. An ECS service is a container
+		// too, but no NetworkPolicy reaches it - its door is a security group, below.
 		Name: "isolate-container",
 		Match: func(st analyzer.Step, _, to ontology.Node) bool {
 			return edgeIn(st.EdgeType, ontology.EdgeExposes, ontology.EdgeRoutesTo, ontology.EdgeHosts) &&
-				to.Label == ontology.LabelContainer
+				to.Label == ontology.LabelContainer && !isECSService(to)
 		},
 		Build: func(_, to ontology.Node) Suggestion { return networkPolicy(to) },
 	},
@@ -67,7 +76,7 @@ var Registry = []Rule{
 		Name: "restrict-public-ingress",
 		Match: func(st analyzer.Step, from, to ontology.Node) bool {
 			return edgeIn(st.EdgeType, ontology.EdgeExposes, ontology.EdgeRoutesTo, ontology.EdgeHosts) &&
-				to.Label == ontology.LabelVirtualMachine && from.Label == ontology.LabelLoadBalancer
+				(to.Label == ontology.LabelVirtualMachine || isECSService(to)) && from.Label == ontology.LabelLoadBalancer
 		},
 		Build: func(from, to ontology.Node) Suggestion { return sgRevoke(from, to) },
 	},
@@ -98,6 +107,17 @@ var Registry = []Rule{
 		Build: func(from, _ ontology.Node) Suggestion { return privescDeny(from) },
 	},
 	{
+		// A role open to every GitHub repository: pin the token's subject in its trust
+		// policy, so only the repositories that deploy with it can assume it.
+		Name: "pin-federated-subject",
+		Match: func(st analyzer.Step, from, to ontology.Node) bool {
+			issuer, _ := from.Properties["oidc_issuer"].(string)
+			return st.EdgeType == ontology.EdgeAuthenticates && from.Label == ontology.LabelIdentityProvider &&
+				from.InternetExposed() && issuer == githubIssuer && to.Label == ontology.LabelIAMRole
+		},
+		Build: func(_, to ontology.Node) Suggestion { return pinGitHubSubject(to) },
+	},
+	{
 		// Cloud lateral movement: cut the discovered reachability between two
 		// instances (SG-to-SG ingress) so the source can no longer reach the target.
 		Name: "segment-lateral-reachability",
@@ -106,11 +126,33 @@ var Registry = []Rule{
 		},
 		Build: func(from, to ontology.Node) Suggestion { return networkSegment(from, to) },
 	},
+	{
+		// An internet-exposed Lambda can be invoked by anyone and then use
+		// its execution role. Cut the Lambda -> role assumption edge by
+		// removing the public invocation path.
+		Name: "close-public-lambda",
+		Match: func(st analyzer.Step, from, to ontology.Node) bool {
+			return st.EdgeType == ontology.EdgeAssumes &&
+				from.Label == ontology.LabelFunction &&
+				from.InternetExposed() &&
+				to.Label == ontology.LabelIAMRole
+		},
+		Build: func(from, to ontology.Node) Suggestion {
+			return closePublicLambda(from, to)
+		},
+	},
 }
 
 // Generate inspects a path and emits remediation artifacts for the edges that
 // are cheapest to cut, de-duplicated by kind+target.
 func Generate(p analyzer.AttackPath) []Suggestion {
+	if p.DirectAccess {
+		// No edge to cut: the jewel is open as it stands, and closing it is the fix.
+		if s, ok := closePublicAccess(p.Target()); ok {
+			return []Suggestion{s}
+		}
+		return nil
+	}
 	index := map[string]ontology.Node{}
 	for _, n := range p.Nodes {
 		index[n.ID] = n
@@ -248,29 +290,40 @@ type HintRule struct {
 var HintRegistry = []HintRule{
 	{ontology.LabelCVE, func(n ontology.Node) string {
 		if fv := propStr(n, "fixed_version"); fv != "" {
-			return fmt.Sprintf("Upgrade the affected dependency to `%s` to remediate **%s**.", fv, n.Name)
+			return fmt.Sprintf("Upgrade the affected dependency to %s to remediate %s.", CodeSpan(fv), CodeSpan(n.Name))
 		}
-		return fmt.Sprintf("Patch or remove the dependency affected by **%s**.", n.Name)
+		return fmt.Sprintf("Patch or remove the dependency affected by %s.", CodeSpan(n.Name))
 	}},
 	{ontology.LabelWeakness, func(n ontology.Node) string {
 		msg := propStr(n, "message")
 		if msg == "" {
 			msg = "Fix the flagged code weakness"
 		}
-		return msg + location(n)
+		return OneLine(msg) + location(n)
 	}},
 	{ontology.LabelSecret, func(n ontology.Node) string {
 		return fmt.Sprintf("Rotate the exposed credential and remove it%s; load it from a secret manager instead.", location(n))
 	}},
+	{ontology.LabelIAMRole, func(n ontology.Node) string {
+		if !n.Bool(ontology.PropPublicAccess) {
+			return ""
+		}
+		// No artifact for this one: the right trust policy names the principals that
+		// truly need the role, which only its owner knows.
+		return fmt.Sprintf("%s can be assumed by anyone: restrict its trust policy (AssumeRolePolicyDocument) to the principals that need it, or add a condition such as `aws:PrincipalOrgID`.", CodeSpan(n.Name))
+	}},
 }
 
-// Hints returns one fix hint per finding node on the path, in path order.
+// Hints returns one fix hint per finding node on the path, in path order. A renderer
+// returning "" has nothing to say about that node.
 func Hints(p analyzer.AttackPath) []string {
 	var out []string
 	for _, n := range p.Nodes {
 		for _, h := range HintRegistry {
 			if n.Label == h.Label {
-				out = append(out, h.Render(n))
+				if hint := h.Render(n); hint != "" {
+					out = append(out, hint)
+				}
 			}
 		}
 	}
@@ -283,13 +336,130 @@ func location(n ontology.Node) string {
 		return ""
 	}
 	if line, ok := n.Properties["line"].(float64); ok && line > 0 {
-		return fmt.Sprintf(" (`%s:%d`)", path, int(line))
+		return fmt.Sprintf(" (%s)", CodeSpan(fmt.Sprintf("%s:%d", path, int(line))))
 	}
 	if line, ok := n.Properties["line"].(int); ok && line > 0 {
-		return fmt.Sprintf(" (`%s:%d`)", path, line)
+		return fmt.Sprintf(" (%s)", CodeSpan(fmt.Sprintf("%s:%d", path, line)))
 	}
-	return fmt.Sprintf(" (`%s`)", path)
+	return fmt.Sprintf(" (%s)", CodeSpan(path))
 }
+
+// closePublicAccess is the fix for a crown jewel open to anyone. For a bucket it is
+// apply-ready: an S3 public access block needs only the bucket's name, and it overrides
+// every public ACL and policy grant at once. A role has no artifact (see its hint). The
+// fix carries no Cut - there is no edge to simulate removing.
+func closePublicAccess(n ontology.Node) (Suggestion, bool) {
+	if n.Label != ontology.LabelBucket || !n.Bool(ontology.PropPublicAccess) {
+		return Suggestion{}, false
+	}
+	name := sanitize(n.Name)
+	content := fmt.Sprintf(`# PerspectiveGraph auto-remediation - %q is readable by anyone. Block every
+# public ACL and bucket-policy grant on it; a grant that must stay public belongs on a
+# bucket that holds nothing sensitive.
+resource "aws_s3_bucket_public_access_block" "perspective_block_public_%s" {
+  bucket                  = %s
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+`, n.Name, name, hclString(n.Name))
+	return Suggestion{
+		Title:     "Block public access to " + n.Name,
+		Kind:      "terraform",
+		Filename:  "block-public-" + name + ".tf",
+		Content:   content,
+		Rationale: "The sensitive bucket is open to anyone, so no edge stands in the way; blocking public access closes it.",
+	}, true
+}
+
+func closePublicLambda(lambda, role ontology.Node) Suggestion {
+	name := sanitize(lambda.Name)
+	exposure := propStr(lambda, ontology.PropExposure)
+
+	content := fmt.Sprintf(`# PerspectiveGraph auto-remediation - Lambda %q is publicly invokable.
+# The verification proves the public entry point is gone; it does not change
+# the permissions granted by the Lambda execution role.
+
+`, lambda.Name)
+
+	switch exposure {
+	case ontology.ExposureFunctionURL:
+		content += "# This function uses an unauthenticated Lambda Function URL.\n" + lambdaURLFix(lambda.Name)
+
+	case ontology.ExposureFunctionPolicy:
+		content += "# This function policy allows any AWS principal to invoke the function.\n" + lambdaPolicyFix
+
+	default:
+		// Not a way the lambda collector writes: a function from another feed, or one whose
+		// exposure was never read. Naming both ways, and how to tell which is open, beats a
+		// file with nothing to apply.
+		recorded := ""
+		if exposure != "" {
+			recorded = fmt.Sprintf(" (it records %q)", exposure)
+		}
+		content += fmt.Sprintf(`# The graph does not say how anyone can invoke this function%s.
+# Check both ways, and apply the fix below that matches:
+#
+#   aws lambda get-function-url-config --function-name %s
+#   aws lambda get-policy --function-name %s
+
+# If the function URL's authorization_type is "NONE":
+`, recorded, shellArg(lambda.Name), shellArg(lambda.Name)) + lambdaURLFix(lambda.Name) + `
+# If the function policy lets principal "*" invoke the function:
+` + lambdaPolicyFix
+	}
+
+	return Suggestion{
+		Title:     "Close public access to Lambda " + lambda.Name,
+		Kind:      "terraform",
+		Filename:  "close-public-lambda-" + name + ".tf",
+		Content:   content,
+		Rationale: "Removes the public Lambda entry point so the internet can no longer reach the function through this path. The verification proves the route is gone, not that the execution role's permissions changed.",
+		Cut: CutEdge{
+			From: lambda.ID,
+			To:   role.ID,
+			Type: string(ontology.EdgeAssumes),
+		},
+	}
+}
+
+// lambdaURLFix closes a function URL without authentication.
+func lambdaURLFix(function string) string {
+	return fmt.Sprintf(`# Update the EXISTING aws_lambda_function_url resource for this function:
+#
+#   authorization_type = "AWS_IAM"
+#
+# Do not create a second aws_lambda_function_url resource.
+
+# When authorization_type was "NONE", remove the public Lambda permissions
+# explicitly as well. These permissions may have been added automatically
+# and are not removed simply by changing or destroying the Function URL.
+#
+# Remove permissions that grant:
+#   lambda:InvokeFunctionUrl
+#   lambda:InvokeFunction
+# to:
+#   principal = "*"
+#
+# For example:
+#
+#   aws lambda remove-permission --function-name %s --statement-id <STATEMENT_ID>
+`, shellArg(function))
+}
+
+// lambdaPolicyFix narrows a function policy that lets any AWS principal invoke it.
+const lambdaPolicyFix = `# Update the EXISTING aws_lambda_permission resource(s).
+#
+# Replace:
+#
+#   principal = "*"
+#
+# with the AWS account or service that actually needs to invoke this function.
+# Where appropriate, also restrict access with source_arn and/or source_account.
+#
+# Do not create a new permission resource that preserves public access.
+`
 
 func networkPolicy(c ontology.Node) Suggestion {
 	app := sanitize(c.Name)
@@ -358,7 +528,7 @@ func iamScopeDown(role ontology.Node) Suggestion {
 #   aws iam detach-role-policy --role-name %s --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
 resource "aws_iam_role_policy" "perspective_least_privilege_%s" {
   name = "%s-least-privilege"
-  role = %q
+  role = %s
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -368,7 +538,7 @@ resource "aws_iam_role_policy" "perspective_least_privilege_%s" {
     }]
   })
 }
-`, role.Name, role.Name, name, name, role.Name)
+`, role.Name, shellArg(role.Name), name, name, hclString(role.Name))
 
 	return Suggestion{
 		Title:     "Scope down IAM role " + role.Name,
@@ -385,17 +555,17 @@ func dataStorePolicy(role, store ontology.Node) Suggestion {
 # Tighten the resource policy / role permissions so this principal can no longer reach the data store.
 resource "aws_iam_role_policy" "perspective_revoke_%s_%s" {
   name = "revoke-%s-access"
-  role = %q
+  role = %s
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
       Effect   = "Deny"
       Action   = "*"
-      Resource = "*" # TODO: scope to %s's ARN
+      Resource = "*" # TODO: scope to the ARN of %q
     }]
   })
 }
-`, role.Name, store.Name, sanitize(role.Name), name, name, role.Name, store.Name)
+`, role.Name, store.Name, sanitize(role.Name), name, name, hclString(role.Name), store.Name)
 
 	return Suggestion{
 		Title:     fmt.Sprintf("Revoke %s access to %s", role.Name, store.Name),
@@ -418,7 +588,7 @@ func privescDeny(p ontology.Node) Suggestion {
 		resourceType, attr, kind = "aws_iam_user_policy", "user", "user"
 	}
 	trustNote := ""
-	if p.Bool(ontology.PropInternetExposed) {
+	if p.InternetExposed() {
 		trustNote = fmt.Sprintf(
 			"\n# NOTE: %q is publicly assumable (trust policy allows Principal \"*\").\n"+
 				"# Also restrict its AssumeRolePolicyDocument to the principals that truly need it.\n",
@@ -428,7 +598,7 @@ func privescDeny(p ontology.Node) Suggestion {
 # primitive on %s %q so it can no longer reach admin-equivalent access.%s
 resource "%s" "perspective_block_privesc_%s" {
   name = "%s-block-privesc"
-  %s = %q
+  %s = %s
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [{
@@ -444,7 +614,7 @@ resource "%s" "perspective_block_privesc_%s" {
     }]
   })
 }
-`, kind, p.Name, trustNote, resourceType, name, name, attr, p.Name)
+`, kind, p.Name, trustNote, resourceType, name, name, attr, hclString(p.Name))
 
 	return Suggestion{
 		Title:     "Block privilege escalation for " + p.Name,
@@ -452,6 +622,55 @@ resource "%s" "perspective_block_privesc_%s" {
 		Filename:  "block-privesc-" + name + ".tf",
 		Content:   content,
 		Rationale: "Cuts the CAN_ESCALATE_TO edge by denying the IAM actions (PassRole, Attach*/Put* policy, CreatePolicyVersion…) that let this principal escalate to admin.",
+	}
+}
+
+// githubIssuer is GitHub Actions' OIDC issuer, as the IAM collector records it.
+const githubIssuer = "token.actions.githubusercontent.com"
+
+// pinGitHubSubject rewrites the trust of a role any GitHub repository can assume so that
+// only named repositories can. The repository is not known here - the trust never said
+// it, which is the bug - so the condition carries a placeholder to fill in.
+func pinGitHubSubject(role ontology.Node) Suggestion {
+	name := sanitize(role.Name)
+	account, _ := role.Properties[ontology.PropAccount].(string)
+	if account == "" {
+		account = "<ACCOUNT_ID>"
+	}
+	content := fmt.Sprintf(`# PerspectiveGraph auto-remediation - role %q trusts GitHub Actions without pinning
+# the token's subject, so a workflow in ANY repository on GitHub can assume it.
+# Name the repositories (and branches or environments) that deploy with it, then set
+#   assume_role_policy = data.aws_iam_policy_document.perspective_pin_github_%s.json
+# on the role.
+data "aws_iam_policy_document" "perspective_pin_github_%s" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+    principals {
+      type        = "Federated"
+      identifiers = ["arn:aws:iam::%s:oidc-provider/%s"]
+    }
+    condition {
+      test     = "StringEquals"
+      variable = "%s:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+    condition {
+      test     = "StringLike"
+      variable = "%s:sub"
+      values   = ["repo:<OWNER>/<REPO>:ref:refs/heads/main"] # replace with yours
+    }
+  }
+}
+`, role.Name, name, name, account, githubIssuer, githubIssuer, githubIssuer)
+
+	return Suggestion{
+		Title:    "Pin the GitHub repositories that can assume " + role.Name,
+		Kind:     "terraform",
+		Filename: "pin-github-subject-" + name + ".tf",
+		Content:  content,
+		Rationale: "Cuts the AUTHENTICATES edge from GitHub Actions: with the token's sub pinned to your " +
+			"repositories, a token minted for any other repository no longer matches the trust.",
 	}
 }
 
@@ -465,14 +684,15 @@ func networkSegment(from, to ontology.Node) Suggestion {
 # ports/protocols instead of the whole security group.
 resource "aws_security_group_rule" "perspective_segment_%s_to_%s" {
   type                     = "ingress"
-  description              = "Tightened by PerspectiveGraph: %s should not freely reach %s"
+  description              = %s
   security_group_id        = "REPLACE_WITH_%s_SG_ID"
   source_security_group_id = "REPLACE_WITH_%s_SG_ID"
   protocol                 = "tcp"
   from_port                = 0    # TODO: only the ports this dependency needs
   to_port                  = 0
 }
-`, from.Name, to.Name, from.Name, to.Name, a, z, from.Name, to.Name, z, a)
+`, from.Name, to.Name, from.Name, to.Name, a, z,
+		hclString("Tightened by PerspectiveGraph: "+from.Name+" should not freely reach "+to.Name), z, a)
 
 	return Suggestion{
 		Title:     fmt.Sprintf("Segment %s ↛ %s", from.Name, to.Name),
@@ -497,6 +717,61 @@ func k8sName(s string) string {
 		out = strings.Trim(out[:63], "-")
 	}
 	return out
+}
+
+// hclString renders s as one HCL quoted string, for a name that comes from the
+// environment. Go's %q is not one: it leaves "${" and "%{" alone, which HCL reads as the
+// start of a template interpolation or directive, and it writes escapes such as \x00
+// that HCL does not have. Here a line break, a quote or a backslash stays inside the
+// string, and "${" and "%{" are doubled, so they stand for themselves.
+func hclString(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for i, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r == '\n':
+			b.WriteString(`\n`)
+		case r == '\r':
+			b.WriteString(`\r`)
+		case r == '\t':
+			b.WriteString(`\t`)
+		case (r == '$' || r == '%') && strings.HasPrefix(s[i+1:], "{"):
+			b.WriteRune(r)
+			b.WriteRune(r)
+		case !unicode.IsPrint(r) && r <= 0xFFFF:
+			fmt.Fprintf(&b, `\u%04X`, r)
+		case !unicode.IsPrint(r):
+			fmt.Fprintf(&b, `\U%08X`, r)
+		default:
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// shellSafe is every character AWS allows in an IAM or Lambda name, plus the separators
+// of an ARN: none of them means anything to a shell inside double quotes.
+const shellSafe = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789+=,.@_-:/"
+
+// shellArg renders s as one shell word, for a command a comment shows for someone to
+// copy. A name AWS would accept is double-quoted as it always was. Anything else is
+// single-quoted, so nothing in it expands when the line is pasted into a shell, and kept
+// to one line, so it cannot end the comment it sits in.
+func shellArg(s string) string {
+	if s != "" && strings.Trim(s, shellSafe) == "" {
+		return `"` + s + `"`
+	}
+	s = strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) {
+			return '?'
+		}
+		return r
+	}, s)
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // sanitize makes a node name safe for use in k8s/terraform identifiers.

@@ -1,0 +1,323 @@
+# Sources and integrations
+
+*Part of the [PerspectiveGraph manual](../MANUAL.md).* Agentless connectors, topology discovery, supply-chain provenance, identity resolution and threat intelligence.
+
+## Agentless connectors: pull, don't wait for an upload
+
+A scanner report only helps once someone uploads it. **Connectors** invert that:
+they reach *out* to a system on a schedule and pull its current state - no agent
+to deploy, no one to remember to `curl`. The goal is the one that won the cloud
+security market: *connect a read-only role and see your real attack paths in
+minutes.*
+
+Crucially a connector publishes onto the **same bus** as the webhooks, so it
+reuses the entire pipeline unchanged - identity resolution, the graph, the
+analyzer. The **`aws`** connector doesn't even add new parsing: it pulls the EC2
+`describe-*` network state and IAM authorization details and feeds them straight
+into the existing `cloudnet`/`iam` collectors. The **`azure`** connector adds a
+thin mapping layer - Azure's native model differs, so NSG CIDR rules become security
+groups, NSG **ASG** sources become SG-to-SG (the east-west micro-segmentation that
+lets the exposed tier reach the sensitive asset), VMs become instances bound to their
+NSGs and ASGs, and VNet peerings become VPC peerings, then the **same** `cloudnet`
+collector parses the result. The acquisition sits behind a
+swappable transport - **`fixtures`** (local JSON, so the whole pull pipeline is
+provable with zero credentials) and a live SDK path (`aws-sdk-go-v2` for AWS,
+read-only with optional cross-account `AssumeRole`; `azure-sdk-for-go` is the
+wired extension point for Azure).
+
+```bash
+# Demo (no cloud account): pull from local describe-* / normalized JSON
+CONNECTORS_ENABLED=aws,azure AWS_CONNECTOR_MODE=fixtures AZURE_CONNECTOR_MODE=fixtures \
+  AWS_FIXTURES_DIR=./backend/testdata AZURE_FIXTURES_DIR=./backend/testdata
+curl -s localhost:8081/connectors | jq   # per-connector health: last run, last error, events
+
+# Live (read-only): assume a cross-account role and pull EC2 + IAM
+CONNECTORS_ENABLED=aws AWS_CONNECTOR_MODE=sdk AWS_REGION=us-east-1 \
+  AWS_ROLE_ARN=arn:aws:iam::<account>:role/PerspectiveGraphReadOnly
+# grant only: ec2:Describe*, iam:GetAccountAuthorizationDetails, iam:ListInstanceProfiles,
+# iam:GetPolicy + iam:GetPolicyVersion (to resolve permissions-boundary documents),
+# eks:ListClusters, eks:ListAccessEntries, eks:ListAssociatedAccessPolicies,
+# lambda:ListFunctions, lambda:GetFunctionUrlConfig, lambda:GetPolicy, lambda:ListTags,
+# ecs:ListClusters, ecs:ListServices, ecs:DescribeServices, ecs:DescribeTaskDefinition,
+# elasticloadbalancing:DescribeLoadBalancers, elasticloadbalancing:DescribeListeners,
+# elasticloadbalancing:DescribeTargetGroups, elasticloadbalancing:DescribeTargetHealth,
+# apigateway:GET (REST, HTTP and WebSocket APIs, their stages, routes and integrations)
+# (all covered by the AWS-managed SecurityAudit policy)
+# plus, for EKS Pod Identity, which SecurityAudit does not cover:
+# eks:ListPodIdentityAssociations, eks:DescribePodIdentityAssociation
+# - deploy/aws has this role ready to deploy; see "The read-only role" below.
+
+# Multi-account: one role per account, comma-separated, pulled in a single pass.
+CONNECTORS_ENABLED=aws AWS_CONNECTOR_MODE=sdk AWS_REGION=us-east-1 \
+  AWS_ROLE_ARN=arn:aws:iam::111111111111:role/PerspectiveGraphReadOnly,arn:aws:iam::222222222222:role/PerspectiveGraphReadOnly
+
+# See what the live connector discovers before wiring it in (describe-* only):
+AWS_REGION=us-east-1 ROLE_ARN=arn:aws:iam::<account>:role/PerspectiveGraphReadOnly \
+  make validate-aws       # internet-exposed seeds vs SG-open-but-suppressed, with reasons
+```
+
+**Several accounts, one estate.** `AWS_ROLE_ARN` takes a list, and each account's assets
+are qualified with the account id AWS reports for its own credentials
+(`sts:GetCallerIdentity` - no extra grant, it is allowed to every principal). That
+qualification is not cosmetic: `i-…` and `sg-…` are unique only *within* an account, so
+without it two accounts that happen to share an identifier collapse into one asset, and
+the engine reports paths through a machine that exists in neither. An account whose role
+has expired costs that account's assets for the pass and nothing more - the others are
+still collected, and `GET /connectors` reports the error. No AWS Organization is needed:
+a role in each account trusting the one the engine runs as is enough.
+
+**EKS.** The connector also reads each EKS cluster's **Pod Identity** associations (which
+IAM role a service account's pods get) and **access entries** (which IAM principals get into
+the cluster, with which access policy): `AmazonEKSClusterAdminPolicy` reaches the cluster's
+cluster-admin outright, `AmazonEKSAdminPolicy` and `AmazonEKSEditPolicy` read secrets, a way
+there. Neither shows in the cluster's own objects. Without the two Pod Identity permissions
+the connector logs a warning and still reads the access entries. For these to meet the
+cluster's dump, send the dump with `?cluster=<the EKS cluster name>`.
+
+### The read-only role
+
+[`deploy/aws`](../../deploy/aws/readonly-role.cfn.yaml) has the role the connector reads
+with, as CloudFormation ([`readonly-role.cfn.yaml`](../../deploy/aws/readonly-role.cfn.yaml))
+and as a Terraform module ([`deploy/aws/terraform`](../../deploy/aws/terraform/main.tf)) -
+the same role either way: the AWS-managed `SecurityAudit` policy, the two Pod Identity reads
+it lacks, and nothing that writes. Deploy it in every account to be read. The one choice is
+who may assume it:
+
+| The backend runs | Set | Then |
+|---|---|---|
+| On EKS, in the same account | `TrustEksPodIdentity=true` (Terraform: `trust_eks_pod_identity`) | Associate the role with the chart's service account, `<release>-perspectivegraph-backend`. No `AWS_ROLE_ARN`. |
+| Anywhere else: a VM, another account, a CI job | `TrustedPrincipalArn`, the role or user it runs as (`trusted_principal_arns`) | `AWS_ROLE_ARN` is the role's ARN. |
+| Across several accounts | In each account, `TrustedPrincipalArn` is the backend's own role; on that role, `AssumableRoleArns` lists them (`assumable_role_arns`) | `AWS_ROLE_ARN` lists them all, comma-separated. |
+
+```bash
+aws cloudformation deploy --stack-name perspectivegraph-readonly \
+  --template-file deploy/aws/readonly-role.cfn.yaml --capabilities CAPABILITY_NAMED_IAM \
+  --parameter-overrides TrustEksPodIdentity=true
+aws eks create-pod-identity-association --cluster-name <cluster> --namespace <namespace> \
+  --service-account <release>-perspectivegraph-backend --role-arn <the stack's RoleArn output>
+```
+
+There is no external ID: it guards a third party that assumes roles for many customers, and
+the engine is your own. IRSA works as well - annotate the service account
+(`serviceAccount.annotations` in the chart) and let the role trust the cluster's OIDC
+provider instead.
+
+Checked on a real account, at no cost (IAM only): a hub role and a target role from the
+template, with the connector reading the account as the hub through the target; the target
+refusing anyone but the hub; IAM's policy simulator denying every write tried - creating a
+user, attaching a policy, launching an instance, opening a security group, writing an
+object, changing a function's code - and allowing every read the connector makes; and the
+Terraform module producing the same role.
+
+**Lambda and ECS.** The connector reads each Lambda function's URL, resource policy, role and
+tags, so a function anyone can invoke is an entry point leading into its execution role, and
+the network pull reads ECS services in awsvpc mode - their security groups, subnets, public
+address and task role - so a service is exposed and reaches its role the way an instance does.
+A Region without Lambda or ECS costs nothing; an ECS read that fails is logged and the rest of
+the network pull goes on.
+
+**Load balancers.** In most AWS estates the internet arrives at a load balancer and the
+workloads sit behind it in private subnets, which the network rules rightly call unexposed -
+so without the load balancer the route was missing altogether. The network pull reads every
+application and network load balancer with its listeners and target groups. An
+internet-facing one is an entry point on the ports its listeners serve that its security
+groups admit (a network load balancer without groups admits what it listens on), through the
+routes and network ACLs of its subnets; it routes to the instances, the ECS services (through
+the target groups a service registers in, so it holds with no task running), the Lambda
+functions and the other load balancers its target groups name. It is keyed the way Cloud
+Custodian keys a load balancer, so both feeds describe the same node.
+
+**API Gateway.** The connector reads every REST, HTTP and WebSocket API with its stages and,
+for each route, whether it asks for credentials and what it integrates with. A deployed,
+non-private API with a route that asks for nothing is an entry point, and that route leads to
+its Lambda function or, through a VPC link, its load balancer - so a function with no URL of
+its own, published through an API, is reached the way an attacker reaches it.
+
+Connectors are **leader-only** (replicas don't multiply API calls), interval-driven
+(`CONNECTOR_INTERVAL`), and observable via `GET /connectors` plus
+`perspectivegraph_connector_*` Prometheus metrics. SDK mode uses the standard AWS
+credential chain (env / shared profile / IRSA / instance role). The network pull also
+reads route tables, NACLs, subnets and each instance's addresses, so an SG open to
+`0.0.0.0/0` on an instance in a **private** subnet (NAT / transit-gateway egress), with no
+public IP, or behind a NACL that blocks the port is *not* reported as internet-exposed -
+the classic false positives that inflate attack-surface counts. Exposure is decided port
+by port and per address family, and the path names the ports (*tcp/22*, *tcp/443*). The
+Azure network feed applies an NSG the way Azure does: rules by priority, first match
+deciding, a `Deny` closing what a later `Allow` opens.
+
+It also resolves each instance's **IAM instance profile** to the role behind it and draws
+`instance --ASSUMES--> IAM_Role`. That edge is what joins the network half of the graph to
+the identity half: without it, *"the internet reaches this box"* and *"this role owns the
+account"* sit in disconnected components and the canonical AWS path - internet → instance →
+IMDS → role → privilege escalation (the Capital One shape) - cannot form. The hop is priced
+on the instance's real IMDS posture: `HttpTokens=required` (IMDSv2) makes a blind SSRF
+insufficient, while IMDSv1 hands the credentials to a single GET. Cloud Custodian prices the
+same hop from the same field, so the two feeds agree on it.
+
+### From your own machine: `make up-aws`
+
+On EC2 or EKS the backend finds the instance's or the pod's role by itself. Anywhere else - a
+laptop, a VM in another cloud - it has no credentials of its own, and
+[`docker-compose.aws.yml`](../../docker-compose.aws.yml) hands it yours, read-only:
+
+```bash
+AWS_PROFILE=<profile> AWS_REGION=eu-west-1 make up-aws
+AWS_PROFILE=<profile> AWS_REGION=eu-west-1 \
+  AWS_ROLE_ARN=arn:aws:iam::<account>:role/PerspectiveGraphReadOnly make up-aws   # read as the role
+```
+
+It mounts `~/.aws` read-only - a profile with keys, one that assumes a role, or an SSO profile
+you have logged in with - and passes credentials already in the environment (`aws-vault`,
+`granted`, `aws configure export-credentials`), which win over the profile as they do for the
+AWS CLI. Before starting it checks that the profile exists and that the backend can read the
+files; then it waits for the first pull and prints its outcome. Assume the role above rather
+than reading as yourself: the connector only reads, but a profile that can write is one that
+can write.
+
+On Linux the backend's user (uid 65532) cannot open a credentials file that is yours and 600,
+which is how `aws configure` writes it - a bind mount keeps the host's owners and modes, where
+Docker Desktop maps them. The check says so and prints the fix, an ACL for that one uid:
+`setfacl -m u:65532:x ~/.aws` and `setfacl -m u:65532:r ~/.aws/config ~/.aws/credentials`.
+
+### Kubernetes: the cluster the engine runs in
+
+With `kubernetes` in `CONNECTORS_ENABLED`, the backend reads the cluster it is installed in
+on the connectors' schedule - the topology, RBAC and, on EKS, the bridges into the AWS
+account that [a posted dump](onboarding.md#kubernetes-topology-auto-discovered-exposure)
+carries - with no cron job and nothing to post. It reads what that dump holds: pods,
+services, service accounts, nodes, ingresses, roles and cluster roles with their bindings,
+and EKS's `aws-auth` map. It assembles the same List `kubectl get … -A -o json` writes and
+hands it to the same collector, so what it finds is what the dump finds.
+
+```bash
+helm install perspective oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
+  --set 'connectors.enabled={kubernetes}' \
+  --set connectors.kubernetes.clusterName=prod-eu     # on EKS: the EKS cluster's name
+```
+
+- **Access.** The chart binds a ClusterRole to the backend's service account: `get` and
+  `list` on those kinds, `get` on the one config map by name, and nothing else - not
+  secrets, not config maps in general, no verb that writes. A test keeps the role and the
+  connector's list of kinds the same. It is the one case in which the backend mounts a
+  Kubernetes API token; it reads the API with it, verifying the server against the
+  cluster's CA, and re-reads the token on every pull because Kubernetes rotates it.
+- **The name.** `clusterName` is required: names repeat across clusters, and on EKS it is
+  how the cluster's objects meet the AWS connector's Pod Identity associations and access
+  entries. `awsAccount` names the account its nodes run in, so a pod's escape to its node
+  meets the instance the AWS connector reads.
+- **What disappears.** A pull that read every kind is a complete snapshot of the cluster
+  (`cluster:<name>`, the scope a posted dump declares with `?snapshot=`), so a pod, binding
+  or service account that is gone leaves the graph at the next pull. A pull that could not
+  read a kind - a 403 from a role edited by hand - still adds and refreshes what it read,
+  but retracts nothing, and `GET /connectors` reports the kind it was refused.
+- **Other clusters.** It reads the cluster it runs in. For another one, send its dump with
+  `perspectivegraph ingest -cluster <name> -snapshot cluster:<name> k8s -` from a job there.
+
+Checked on a kind cluster with nothing posted to the engine: a workload behind an Ingress,
+whose service account was bound to `cluster-admin`, came out of the connector's pulls as
+*Ingress → Service → pod → service account → cluster-admin*; deleting the binding took the
+path off the board at the next pull; and the backend's account could list pods but neither
+read a secret nor create a pod.
+
+## Topology discovery (no hand-stitched IDs)
+
+`make seed-discovery` posts a raw Kubernetes dump (`kubectl get … -o json`), a
+cloud-network export (AWS `describe-*`) and an IAM authorization dump
+(`aws iam get-account-authorization-details`) - the same shapes the `aws`
+connector pulls live. PerspectiveGraph **auto-discovers**
+the exposure/reachability topology no scanner produces:
+
+- **Kubernetes** → `Ingress → Service → Pod → ServiceAccount → Role`, surfacing
+  e.g. *internet → ingress → pod → cluster-admin* - a privilege-escalation path
+  found from cluster config alone. RBAC is modeled in depth: beyond
+  wildcard/`admin`-named roles, a role that grants an **escalation primitive**
+  (`create pods`, `read secrets`, `bind`/`escalate` roles, `impersonate`,
+  mint SA tokens) draws a `CAN_ESCALATE_TO` edge to a synthetic **cluster-admin**
+  - BloodHound-for-Kubernetes, not just a name check.
+- **SSO / identity federation** (Okta, Entra, …) → the modern front door:
+  `IdentityProvider(internet) → AUTHENTICATES → User → ASSUMES → IAM_Role`. The
+  federated role is ARN-keyed, so it converges with the IAM graph - a **no-MFA**
+  Okta user who federates into an admin/escalation role surfaces the whole chain
+  *internet → Okta → user → cloud admin*, with the no-MFA hop weighted as easily
+  phishable.
+- **Cloud network** → internet-facing security groups, SG-to-SG reachability and
+  VPC peering, surfacing e.g. *internet → web tier → PII database*.
+- **IAM privesc graph** ("BloodHound for cloud") → flattens each principal's
+  effective permissions, matches them against known escalation primitives
+  (`iam:PassRole`+compute, `iam:AttachUserPolicy`, `iam:CreatePolicyVersion`, …;
+  those acting on the principal's own user or groups only for users)
+  and draws `CAN_ESCALATE_TO` edges to a synthetic **account-admin** sensitive asset.
+  A role trusting `"Principal":"*"` is flagged internet-exposed, surfacing
+  *internet → publicly-assumable role → CAN_ESCALATE_TO → account compromise*.
+  So is a role trusting GitHub Actions without a `sub` condition that names an
+  owner: *GitHub Actions (any repository) → role → …*.
+
+This is what turns "demo that works because the IDs line up by hand" into
+"discovery on real infrastructure".
+
+Sensitive-asset classification isn't purely tag-driven either: an untagged
+`Database`/`Bucket` whose name carries a strong sensitive-data signal (pii,
+customer, payment, credential, …) is **inferred** a sensitive asset and marked
+`crown_jewel_basis="inferred:<signal>"` - so a missed tag doesn't hide a target,
+and the guess is auditable (the dashboard shows *sensitive asset (inferred)*). An
+explicit owner tag always wins.
+
+## Supply-chain provenance (SBOM, signing, SLSA)
+
+The modern breach often starts before runtime - a tampered build, an unsigned
+image, a poisoned dependency. The **supply-chain collector** (`/ingest/supplychain`)
+stamps each image with its trust signals and bill of materials, assembled from
+the tools you already run:
+
+```bash
+syft "$IMG" -o cyclonedx-json > sbom.json
+cosign verify "$IMG"                                  && SIGNED=true  || SIGNED=false
+cosign verify-attestation --type slsaprovenance "$IMG" # SLSA build attestation
+curl -X POST "$INGEST/ingest/supplychain" -d "{\"image\":\"$IMG\",\"signed\":$SIGNED,\"slsa_level\":3,\"sbom\":$(cat sbom.json)}"
+```
+
+The image gets `signed` / `slsaLevel` / `sbomComponents`, and every SBOM
+component becomes a `Library`/`Package` the image **DEPENDS_ON** (the full bill,
+not just the vulnerable parts Trivy flags). A component Trivy also reports is the
+same node, carrying the CVE Trivy found: it is keyed by the name Trivy gives the
+package - read from its `purl`, so a Maven component is `groupId:artifactId` - and
+its version. Crucially, an **unsigned image is
+treated as a tampering vector**: the built-in invariant
+**`no-internet-to-unsigned-image`** fires when one is reachable from the internet,
+and the kill chain flags the image **⚠ unsigned** - so "this prod image isn't
+signed *and* sits on a path to the sensitive asset" surfaces as a policy violation,
+not a footnote. `sbom` accepts a plain component list or a CycloneDX document
+(raw `syft`/`trivy` output), so real tool output drops in unchanged.
+
+## Identity resolution you can trust (confidence + explainability)
+
+Correlation across tools is only as good as the joins underneath it. When the
+normalizer **infers** a link rather than reading one a tool asserted - e.g.
+stitching a runtime container to the image a scanner reported - it now records
+**how** and **how sure**: a digest pin is an exact identity (`1.0`), a tagged
+ref is strong (`0.85`), a bare name is a weak correlation worth verifying
+(`0.6`), and a weaker join lowers the stitched edge's probability so a path
+resting on a shaky correlation scores below one built on a hard identity. The
+provenance rides on the node (`resolutionMethod` / `resolutionConfidence` /
+`resolutionAlias`) and surfaces in the kill chain as a **"⚠ heuristic join · N%"**
+badge - so an analyst can *see, and distrust,* a heuristic correlation instead
+of mistaking it for ground truth. A guess never replaces a fact: when one source
+states a link another inferred, the stated one stays whichever arrives first, and
+an inferred write only confirms it is still there.
+
+## Threat-intel: KEV + EPSS (optional)
+
+Severity is a label; *exploitation* is a fact. Enable the threat-intel layer and
+PerspectiveGraph enriches every CVE with **CISA KEV** (the catalog of
+vulnerabilities *known exploited in the wild*) and **FIRST EPSS** (the
+probability of exploitation in the next 30 days). KEV/EPSS reweight the `AFFECTS`
+edge so path scores reflect real exploitation likelihood, not a severity guess -
+and a KEV CVE on a *reachable, runtime-confirmed* path is the strongest
+prioritization signal there is: theoretical → exploited-somewhere → exploited-here.
+
+```bash
+THREATINTEL=on make run-backend   # fetches live from CISA + FIRST (cached)
+```
+
+Disabled by default (zero network); the `AFFECTS` edge then keeps its
+severity-derived weight.

@@ -76,6 +76,12 @@ data:
         proxy_pass http://{{ include "perspectivegraph.backendHost" . }}:{{ .Values.service.apiPort }}/remediation/;
         proxy_set_header Host $host;
       }
+      # The merge gate's comparison: its body is a scanner report, often past nginx's 1 MiB.
+      location /gate/ {
+        proxy_pass http://{{ include "perspectivegraph.backendHost" . }}:{{ .Values.service.apiPort }}/gate/;
+        client_max_body_size 32m;
+        proxy_set_header Host $host;
+      }
       location / {
         try_files $uri $uri/ /index.html;
       }
@@ -100,6 +106,9 @@ spec:
         app.kubernetes.io/instance: {{ .Release.Name }}
         app.kubernetes.io/component: frontend
     spec:
+      # No Kubernetes API token: nothing in this pod calls the API, and a token mounted by
+      # default is a credential an attacker inside the container gets for free.
+      automountServiceAccountToken: false
       # Pod Security Standards `restricted` refuses a pod without these, and a cluster
       # enforcing it is common wherever this would be deployed - so without them the
       # dashboard is not merely unhardened, it is unschedulable. fsGroup is what makes the

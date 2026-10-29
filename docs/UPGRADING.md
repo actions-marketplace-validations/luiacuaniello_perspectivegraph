@@ -17,6 +17,918 @@ digest, take the backup, stage it.
 
 ---
 
+## 1.39.2
+
+### Ingest refuses v1 signatures by default, and the gate no longer sends one
+
+**Affects you if** something posts to the ingest endpoints with a signature of its own
+making that is v1 only (`X-PerspectiveGraph-Signature: sha256=…`, the body alone). The
+`gate` subcommand from 1.20, the GitHub Action, `perspectivegraph ingest` and the Postman
+collection all sign v2 and keep working.
+
+The v1 signature covers the body alone. While the engine accepted it - the default until
+now - a captured request could be sent again at any time, or with `?sha=` changed to put its
+findings, or its lack of them, on another commit. And because the gate signed both, every
+report it posted carried a v1 as well: strip the v2 header from a captured one, and what was
+left was a request the default accepted. `INGEST_HMAC_ACCEPT_V1` now defaults to `false`,
+and the gate sends v2 alone.
+
+What you will see: a sender that signs only v1 gets `401`, with a message naming
+`X-PerspectiveGraph-Signature-V2`, and
+`perspectivegraph_auth_denied_total{surface="ingest",reason="v1_refused"}` counts it. To find
+such a sender before you upgrade, check that this stays at zero on the running version:
+
+```
+sum(increase(perspectivegraph_ingest_signatures_total{version="v1"}[7d]))
+```
+
+What to do: move the sender to v2 - [how to sign](manual/onboarding.md#authentication).
+Until you can, set `INGEST_HMAC_ACCEPT_V1=true` (Helm: `ingest.hmacAcceptV1: true`), and know
+that for as long as it is on, that sender's requests can be replayed. A `gate` binary older
+than 1.20 signs v1 only. The GitHub Action runs the newest release unless its `version` input
+pins one, and the GitLab template the one `PERSPECTIVEGRAPH_VERSION` names: a pin older than
+1.20 has to move.
+
+### With several tenants, an OIDC token has to name its own
+
+**Affects you if** you sign users in with OIDC and configure a tenant besides the default -
+in `INGEST_HMAC_SECRETS`, `API_TOKENS` or `CONNECTOR_TENANT`.
+
+A token without the tenant claim (`OIDC_TENANT_CLAIM`, `tenant` unless renamed) used to be
+read as the default tenant's. With one tenant that is right; with several, the default is a
+tenant like the others, and a subject the IdP failed to place in one read its graph. Such a
+token is now refused with `401`, and the engine logs once which claim it is missing. A
+single-tenant deployment is unaffected.
+
+What to do: have the IdP mint the claim for every user, including `default` for the default
+tenant's users, before you upgrade.
+
+### Two names for one tenant, or two ingest secrets for one, stop the engine
+
+**Affects you if** your configuration spells a tenant two ways that differ in more than
+case - `acme-corp` and `acme.corp`, across `INGEST_HMAC_SECRETS`, `API_TOKENS` and
+`CONNECTOR_TENANT` - or gives one tenant two ingest secrets (`Acme:s1,acme:s2`, or
+`INGEST_HMAC_SECRET` together with `default:` in `INGEST_HMAC_SECRETS`).
+
+Tenant names are normalized to `[a-z0-9_]`, so those names were already one graph: two
+customers named that way read each other's attack paths, and the second ingest secret
+silently replaced the first, so a sender signing with it was refused. The engine now
+refuses to start and names both entries.
+
+What to do: spell each tenant one way, best already in `[a-z0-9_]`, and give each one
+ingest secret.
+
+### Production refuses a passphrase as STORE_ENCRYPTION_KEY
+
+**Affects you if** `PG_ENV=production` and `STORE_ENCRYPTION_KEY` is anything but 64 hex
+characters. The Helm chart's generated key and `make prod-init` are 64 hex characters, so
+only a key someone typed is affected.
+
+A passphrase becomes the key through a single SHA-256, so whoever holds an encrypted backup
+can test guesses at hashing speed. The engine now refuses to start with one in production,
+and warns about one elsewhere.
+
+What to do: to keep the stores already encrypted readable, set the passphrase's SHA-256 as
+the key - it is the same key, written out:
+
+```bash
+printf %s "$PASSPHRASE" | sha256sum | cut -d' ' -f1
+```
+
+On macOS use `shasum -a 256` in place of `sha256sum`. That makes the strength of the key the strength of the
+passphrase, no more: for a new deployment, generate one with `openssl rand -hex 32`.
+
+## 1.37.0
+
+### Single VM: Caddy is built with golang.org/x/net 0.60.0, and a scan of it is clean
+
+**Affects you if** you run the single-VM recipe (`make prod-init`) from 1.36.0 - above all
+if you scan what you run. Nothing else contains Caddy: neither the Helm chart nor the other
+compose files use it.
+
+The recipe compiles Caddy on your machine, and 1.36.0 compiled release 2.11.7 with the
+dependencies that release names - among them `golang.org/x/net` v0.59.0. Five HTTP/2
+advisories are filed against that version (GO-2026-6603, -6610, -6611, -6612 and -6617;
+three of them let a client crash or exhaust a server), and a scanner reports them on that
+build: Trivy by the module's version, `govulncheck` by the names of the functions Caddy
+calls.
+
+What runs is narrower than what they report. Compiled with Go 1.27, `golang.org/x/net/http2`
+serves and dials through the standard library's HTTP/2, and its own server and client are
+left out of the build by their build tags. The recipe compiles with Go 1.27.2, which has all
+five fixed. Checked on the binary 1.36.0 builds: it holds no symbol of `x/net`'s HTTP/2
+server, and the standard library's in its place. What it does hold of the code the fixes
+touch - `x/net`'s frame reader and its wrapper around the standard client - is not what
+answers HTTP/2 on port 443.
+
+So no way to exploit these against the recipe as shipped is known - and it is fixed anyway,
+because the answer to a scanner's finding should not be an argument about build tags. No
+Caddy release moves that dependency yet, so the recipe now builds Caddy from a module of its
+own, [`deploy/caddy/go.mod`](../deploy/caddy/go.mod): what Caddy 2.11.7 requires, except
+`golang.org/x/net` v0.60.0. Trivy scans the image built from it on every change.
+
+What to do: upgrade as [the recipe describes](manual/single-vm.md#upgrade) - check out the
+release and run `make prod-init`, which rebuilds Caddy's image and replaces its container.
+The certificates, the credentials and `.env` are kept. `docker compose up -d` on its own is
+not enough: Caddy's image is built on your machine, not pulled, so without the build the old
+one keeps running. To see what the running Caddy was built from:
+
+```bash
+docker compose exec caddy caddy build-info | grep golang.org/x/net
+```
+
+The line names `v0.60.0` once the upgrade is done.
+
+## 1.36.0
+
+### Helm: the backend runs as its own service account, and no pod mounts an API token
+
+**Affects you if** you deploy with the Helm chart and bound a cloud role to the namespace's
+`default` service account - an IRSA annotation on it, or an EKS Pod Identity association
+naming it - so that the AWS connector could read the account.
+
+The backend now runs as `<release>-perspectivegraph-backend`, a service account the chart
+creates (`serviceAccount.create`, on by default), so a role bound to it reaches the backend
+and nothing else in the namespace. A role bound to `default` no longer reaches the backend:
+the connector reads with the node's role, or not at all, and `GET /connectors` reports the
+error. No pod in the chart mounts a Kubernetes API token any longer either - none of them
+calls the API - so every pod is replaced on upgrade.
+
+What to do, if you bound a role to `default`: move it. Either recreate the EKS Pod Identity
+association with `--service-account <release>-perspectivegraph-backend`, or put the IRSA
+annotation in `serviceAccount.annotations` (and the service account's name in the role's
+trust policy). To keep the old binding instead, set `serviceAccount.create=false` and
+`serviceAccount.name=default`.
+
+### Restoring a pg_dump: the documented recipe left the graph detached
+
+**Affects you if** you restored the database from a `pg_dump` following the backup section
+of [OPERATIONS](OPERATIONS.md#4-backup--restore-the-graph-is-sensitive-data) - and you will
+have noticed: every query since answers `graph with oid N does not exist`, and the dashboard
+is empty. Dumps themselves were always complete; physical backups (CloudNativePG's) are not
+affected.
+
+Apache AGE names each graph in its own catalog by the OID of the graph's schema, `pg_dump`
+writes that as a plain number, and the schema a restore creates gets a new one. The recipe
+stopped at `pg_restore`, so the catalog kept pointing at the old schema. It now ends with a
+step that points it at the restored one - found by restoring a dump in CI, which the
+single-VM recipe's check now does on every change.
+
+What to do, on a database restored that way: run, as a superuser,
+
+```sql
+BEGIN;
+SET LOCAL session_replication_role = replica;
+UPDATE ag_catalog.ag_label l SET graph = g.namespace::oid
+  FROM ag_catalog.ag_graph g
+ WHERE l.graph = g.graphid AND g.graphid <> g.namespace::oid;
+UPDATE ag_catalog.ag_graph SET graphid = namespace::oid WHERE graphid <> namespace::oid;
+COMMIT;
+```
+
+then restart the backend. On a database that was never restored, it changes nothing.
+
+## 1.35.0
+
+### Terraform plans: load balancers, ECS, API Gateway, EKS and network ACLs are read
+
+**Affects you if** you gate Terraform plans (`source: terraform`).
+
+A plan's load balancers, ECS services, API Gateway APIs, EKS access and network ACLs were
+skipped: a pull request that put an instance behind a public load balancer, published an API
+route that asks for no credentials, or gave a pod an administrator role passed as `clean`. They
+are read now, and such a plan blocks. A network ACL that keeps the internet out of a subnet now
+keeps a plan's instance there from being reported, too.
+
+As with security groups in 1.34.1, what a plan changes of one of these that it does not define -
+a listener on a load balancer another configuration manages, a route on such an API, a rule on
+such a network ACL - is listed in `incomplete` unless `aws-region` reads the account, and a run
+that finds no route then answers `unknown` (exit 2) where it answered `clean`.
+
+What to do: nothing, if the job sets `aws-region`. Otherwise expect `unknown` on plans that
+change load balancers, APIs or network ACLs they do not define: add `aws-region` - a job that
+runs `terraform plan` already holds AWS credentials - or set `allow-unknown`.
+
+---
+
+## 1.34.1
+
+### A Terraform plan that opens what it does not describe is no longer clean
+
+**Affects you if** you gate Terraform plans (`source: terraform`).
+
+A security group serves whatever uses it, and a plan holds only what its configuration manages.
+A plan that added a rule to a group another configuration manages, or launched an instance into
+such a group, was judged without the rest of that group: the instances elsewhere that the new
+rule opens, the rules elsewhere that the new instance meets. Measured on a real account, a plan
+putting an instance with an administrator role into a group open to SSH passed as `clean`, with
+the account read live or not.
+
+With `aws-region` (`-aws-region`) the plan's network is now laid over the account's, as the live
+read describes it, and those routes are found. Without it - the plan alone, an `estate` file, or
+server mode - what the plan opens of a security group, subnet or route table it did not create,
+and the rules of a group it uses but does not hold, are listed in `incomplete`: a run that finds
+no route then answers `unknown` (exit 2) where it answered `clean`.
+
+What to do: give the job `aws-region` and a read-only role - a job that runs `terraform plan`
+already holds AWS credentials. To keep passing such plans without it, set `allow-unknown`,
+knowing that the gate then does not see those routes.
+
+---
+
+## 1.32.0
+
+### Helm values are checked against a schema
+
+**Affects you if** you install with Helm and pass your own values file or `--set` flags.
+
+The chart now ships a `values.schema.json`, and Helm checks your values against it on
+`install`, `upgrade`, `lint` and `template`. A key the chart does not know - a misspelt
+`netwrokPolicy:`, or one an earlier release removed - used to be ignored, leaving the setting
+you meant at its default; now the command fails and names the key. A value of the wrong type
+fails the same way.
+
+What to do: before upgrading, run `helm lint` or `helm template` with your values and fix or
+remove any key it reports.
+
+### The account's Block Public Access is read, and a closed bucket is retracted
+
+**Affects you if** you send Cloud Custodian exports that include S3 buckets.
+
+A bucket whose policy is public was reported open even when the account's Block Public Access
+kept every stranger out: the collector read only the bucket's own settings. It now also reads the
+account's, from an `aws.account` resource that Custodian's `s3-public-block` filter annotates, and
+applies the stricter of the two, setting by setting, as S3 does. A bucket's exposure is now written
+either way, too: a bucket closed after one export - by its owner, or by such a setting - is
+retracted by the next, where before it stayed open in the graph.
+
+What to do: add the `aws.account` policy shown in the [onboarding
+guide](manual/onboarding.md#cloud-custodian-cloud-inventory--iam) to your Custodian export. It
+needs `s3:GetAccountPublicAccessBlock`, which `SecurityAudit` includes. Without it, buckets are
+judged as before. Expect fewer routes starting at public buckets on accounts that block public
+access.
+
+---
+
+## 1.31.0
+
+### API Gateway is read: an open route is a way in
+
+**Affects you if** you publish Lambda functions, or private load balancers, through Amazon
+API Gateway.
+
+A function with no URL of its own, published through an API, was not an entry point: the
+Lambda collector marked it `invoked_by` API Gateway and stopped there, since whether the API
+asked for credentials was not read. A new collector, `POST /ingest/apigateway`, and a new AWS
+connector feed, `apigateway`, read REST, HTTP and WebSocket APIs. An API that is deployed, not
+private, and has a route asking for nothing - no authorizer, no API key - is an entry point,
+unless a REST API's resource policy keeps strangers out; each open route leads to its Lambda
+function, or through a VPC link to its load balancer. Routes behind an authorizer lead
+nowhere. APIs are a new node label, `API`.
+
+The resource-policy reader also learned the commonest API policy: allow everyone, then deny
+everyone outside a list of addresses or a VPC endpoint. That keeps an internet attacker out,
+and is now read so.
+
+What to do: nothing - `apigateway:GET` is inside `SecurityAudit`. A custom read-only role
+needs `apigateway:GET`; without it the connector reports the error for that feed and reads the
+rest. Expect new routes through public APIs.
+
+---
+
+## 1.30.0
+
+### Load balancers are read, and the routes behind them appear
+
+**Affects you if** you use the AWS connector or send cloudnet bundles, and your workloads sit
+behind a load balancer - which is most AWS estates.
+
+The network feed read security groups, instances and subnets but no load balancer. An instance
+or ECS service in a private subnet behind an internet-facing load balancer was rightly called
+unexposed, and since nothing in the graph led to it, no route through it was found. The network
+pull now reads application and network load balancers with their listeners and target groups:
+an internet-facing one is an entry point on the ports its listeners serve that its security
+groups admit, and it routes to its targets - instances, ECS services through the target groups
+they register in, Lambda functions, other load balancers.
+
+The Cloud Custodian collector also read load balancers only under `aws.elb` and `aws.elbv2`.
+Custodian calls application and network load balancers `aws.app-elb`, so a real export's were
+dropped; they are read now, and keyed like the network feed's, so the two meet.
+
+What to do: nothing - the reads are inside `SecurityAudit`. A custom read-only role needs
+`elasticloadbalancing:DescribeLoadBalancers`, `DescribeListeners`, `DescribeTargetGroups` and
+`DescribeTargetHealth`; without them the connector logs a warning and reads the rest of the
+network. Expect new routes, many of them through load balancers you know well.
+
+---
+
+## 1.29.1
+
+### Public means what AWS means by it, for bucket and function policies
+
+**Affects you if** you send S3 buckets through Custodian, or read Lambda functions.
+
+1.29.0 read a statement open to every principal as narrowed by any condition except TLS. AWS
+does the opposite: a statement is public unless a condition confines it to fixed values of a
+short list of keys - the caller's account, organization or ARN, its source network
+(`aws:SourceIp` no wider than `/8`), the resource or account calling. Checked against AWS's
+own verdict (`GetBucketPolicyStatus`) on a real account, three bucket policies 1.29.0 called
+private are public: a condition on `aws:Referer`, `aws:SourceVpc` set to `vpc-*`, and
+`aws:SourceIp` set to `0.0.0.0/1`. A conditional `Deny` - the common "deny unless over TLS" - no
+longer cancels a public `Allow`.
+
+A function URL without authentication created since October 2025 also needs
+`lambda:InvokeFunction` granted to everyone; without it Lambda answers 403, and 1.29.0 called
+such a function open. The connector now reads the URL's `CreationTime` to tell; a URL older than
+November 2025, or one whose bundle lacks `CreationTime`, is judged by the older rule.
+
+What to do: nothing. Expect more public buckets, among them any whose only restriction is a
+`Referer`, and fewer open functions. `make entrypoints-lab-aws` reruns the comparison on your
+own account.
+
+---
+
+## 1.29.0
+
+### Routes cross between an EKS cluster and its AWS account
+
+**Affects you if** you run EKS and send cluster dumps alongside AWS data.
+
+The cluster and the account were two graphs side by side: no route crossed from a pod into
+an IAM role, or from an IAM role into the cluster. Now:
+
+- a service account annotated for IRSA assumes its IAM role;
+- a pod that can escape its container reaches its node's EC2 instance, and so the
+  instance's role - for this, add `node` to the dump and send it with `?account=<id>`;
+- an IAM role or user mapped in `kube-system/aws-auth` assumes the cluster roles its groups
+  are bound to in that cluster, and `system:masters` is cluster-admin - add the ConfigMap to
+  the dump;
+- EKS Pod Identity associations and access entries, which only the EKS API holds, come from
+  the AWS connector (or `POST /ingest/eks`). Access entries are inside `SecurityAudit`; Pod
+  Identity needs `eks:ListPodIdentityAssociations` and `eks:DescribePodIdentityAssociation`,
+  and without them the connector logs a warning and reads the rest.
+
+What to do: send each cluster's dump with `?cluster=<its EKS name>` so the EKS data meets it.
+Expect new routes, many of them P1: an IAM role with cluster-admin through aws-auth or an
+access entry, reachable from wherever that role is reachable, is exactly the route that was
+missing.
+
+### Exposure is decided port by port, and closing a security group retracts it
+
+**Affects you if** you ingest cloud network data (the AWS connector, a cloudnet bundle, the
+Azure network feed).
+
+What the internet reaches of an instance is now the ports that pass every layer: its
+security groups (protocol and ports read, IPv6 sources read from `Ipv6Ranges` - before, an
+IPv6-open group was never seen), a public address (when the record carries addressing, as
+`describe-instances` does), a route to an internet gateway for that address family, and the
+NACL port by port, first match by rule number (before, the first internet entry decided for
+every port, so "allow 443, deny all" opened SSH too). ICMP alone is no longer an entry point.
+Azure NSGs are evaluated by priority with `Deny` rules applied; only `Allow` rules were read.
+The ports appear on the node (`exposedPorts`, `exposedManagementPorts` in GraphQL) and on
+`CONNECTS_TO` edges.
+
+Exposure is also retractable now. The network source wrote `internet_exposed` only when it
+was true, and properties accumulate, so an instance stayed exposed after its group was
+closed - and Custodian, which sees only a public address, could re-expose one the network
+source had cleared. The network source now writes its verdict either way
+(`network_exposed`), and where present it decides.
+
+What to do: nothing. Expect fewer exposed instances on the next network ingest, and some new
+ones open only on IPv6. An instance flagged before the upgrade keeps its flag until the
+network source describes it again.
+
+### A role open to every GitHub repository is an entry point
+
+**Affects you if** your IAM roles trust GitHub Actions' OIDC issuer.
+
+The IAM reader read the `AWS` and `Service` principals of a trust policy and ignored
+`Federated` ones. A role that trusts `token.actions.githubusercontent.com` without pinning
+the token's `sub` to an owner can be assumed by a workflow in any repository on GitHub - and
+the engine did not see it. It now draws a *GitHub Actions* identity provider into the role;
+when the trust is open, that node is an entry point and the routes from it appear, often as
+P1.
+
+What to do: nothing to upgrade. To close such a route, add a `StringEquals` (or
+`StringLike`) condition on `token.actions.githubusercontent.com:sub` naming your
+repositories, e.g. `repo:acme/payments:ref:refs/heads/main`.
+
+### Bucket policies, Lambda functions and ECS services are read
+
+**Affects you if** you send S3 buckets through Custodian, or run Lambda or ECS.
+
+- **S3.** A bucket was public only through an ACL grant; its policy was not read, and since
+  April 2023 a policy is how a bucket is made public. Now a statement allowing `s3:GetObject`
+  (or `s3:PutObject`) to every principal, with no condition narrowing who, makes the bucket
+  public, and the node says how (`public_via`). Block Public Access, when the export carries
+  it (`c7n:PublicAccessBlock`), closes what it closes. The roles and users a bucket policy
+  names get a `HAS_PERMISSION` edge to the bucket.
+- **Lambda.** New source, `POST /ingest/lambda`, and a new AWS connector feed, `lambda`: a
+  function anyone can invoke - a function URL without authentication, or a policy open to
+  every principal - is an entry point, and it assumes its execution role. Functions are a new
+  node label, `Function`.
+- **ECS.** The network feed (`ecs_services` in a cloudnet bundle, read by the connector)
+  draws each awsvpc service as a workload exposed by the same rules as an instance, assuming
+  its task role.
+
+What to do: keep `Policy` in the Custodian `aws.s3` output (it is there by default). The
+connector's reads are all inside `SecurityAudit`. A custom read-only role needs
+`lambda:ListFunctions`, `lambda:GetFunctionUrlConfig`, `lambda:GetPolicy`, `lambda:ListTags`,
+`ecs:ListClusters`, `ecs:ListServices`, `ecs:DescribeServices` and
+`ecs:DescribeTaskDefinition`; without them the connector reports the error for that feed and
+reads the rest. Expect new routes from public buckets and functions.
+
+---
+
+## 1.28.3
+
+### The IAM reader reads NotAction, and no longer lets a conditional Deny hide an escalation
+
+**Affects you if** your IAM policies use `NotAction`, `NotResource`, or a `Deny` with a
+`Condition`.
+
+The reader said it erred toward reporting too much; three shapes made it report too little. An
+`Allow` written with `NotAction` ("everything except…") was not read at all, so every escalation
+it grants was missed. A `Deny` with a `Condition` - "unless MFA", "unless from this network" - was
+applied as if it always held, hiding an escalation that is real whenever the condition is not
+met. A `Deny` with `NotResource` was applied to the whole account.
+
+Now a `NotAction` `Allow` grants everything but what it names, a `NotResource` `Deny` is not
+applied (like any `Deny` confined to specific resources), and a conditional `Deny` is not applied
+either: an escalation that only it might block is reported at `0.5` and marked
+`deny_condition_unevaluated`, the way an unreadable permissions boundary is. `redteam -compare`
+grades such a claim `unsettled (conditional)` when AWS refuses it, since AWS answered for one
+request context.
+
+What to do: nothing. New escalation edges appear at the next IAM pull or upload; none that was
+reported before goes away.
+
+### Load balancers and databases from Custodian are keyed by Region too
+
+**Affects you if** your Custodian bundles carry resource ARNs (real exports do) or a `region`.
+
+A load balancer's name and an RDS identifier are unique per account *and* Region; 1.28.2 added
+the account only, so `prod-db` in two Regions of one account was still one database. The Region
+now comes from the resource's ARN (`LoadBalancerArn`, `DBInstanceArn`), else from an optional
+`region` field on the bundle. And a load balancer is linked by its `app` tag only to instances
+in its own Region - read from their `Placement.AvailabilityZone` - since it cannot route anywhere
+else; an internet-facing ALB in one Region used to lead into instances of another.
+
+What to do: a data classification of a database names its `region` as well as its `account`.
+Load balancer and database nodes from exports that carry a Region get new ids; the old ones stay
+until `GRAPH_TTL` prunes them, or start from an empty graph. An export without ARNs or `region`
+keeps the ids it had.
+
+---
+
+## 1.28.2
+
+### An SBOM component and the library Trivy reports are one node
+
+**Affects you if** you send SBOMs to `/ingest/supplychain` and Trivy reports for the same
+images.
+
+The SBOM keyed a component `name:version`, while Trivy keys name and version apart, and it
+named a Maven package by its artifact where Trivy says `groupId:artifactId`. Every component
+both feeds report was two nodes, and the SBOM's never carried the CVE Trivy found on it. No
+route was invented or lost - Trivy's node carried the CVE - but inventories and counts saw
+those components twice. The SBOM now keys a component as Trivy does, reading Trivy's name for
+it from its `purl`, and both write `DEPENDS_ON` at the same probability, so the converged edge
+does not depend on which arrived last.
+
+What to do: SBOM component nodes get new ids. An SBOM upload is a partial observation unless
+sent with `?snapshot=<scope>`, so the old nodes stay until `GRAPH_TTL` prunes them; re-send
+with `?snapshot=` or start from an empty graph. A plain component list without `purl` keeps
+each `name` as given: write Maven components as `groupId:artifactId` there, or add the `purl`.
+
+### A Falco alert lands on the pod the Kubernetes dump describes
+
+**Affects you if** you send Falco alerts and Kubernetes dumps.
+
+Falco keyed an alert's container by its own name (`payments`); the Kubernetes dump keys the
+pod it runs in as `namespace/pod`. The alert sat on a node of its own, and no route through
+the pod was ever marked runtime-confirmed - so the runtime factor never raised a discovered
+route's priority. An alert carrying `k8s.pod.name` and `k8s.ns.name` is now keyed as the dump
+keys the pod; one without them keeps the container's name.
+
+What to do: with more than one cluster, send Falco to `/ingest/falco?cluster=<name>`, the
+name that cluster's dump is sent with. A topology written by hand that keyed a container as
+Falco used to must key the pod as `namespace/pod` (see
+[onboarding](manual/onboarding.md#4-identifier-correlation-the-make-or-break-detail)). The old
+alert nodes stay until `GRAPH_TTL` prunes them, or start from an empty graph.
+
+### Load balancers and databases from Custodian are keyed with their account
+
+**Affects you if** you ingest Custodian bundles from more than one AWS account.
+
+An RDS identifier and a load balancer's name are unique only within one account and Region, and
+Custodian keyed both by name alone, as it keyed instances before 1.28.0. This release adds the
+account; 1.28.3 adds the Region. Two accounts' `web-alb` were one
+node: an internet-facing one in account A and an internal one in account B made a public load
+balancer that led into B. Both now carry the bundle's `account_id`; buckets stay unscoped,
+since their names are unique across AWS.
+
+What to do: a data classification of a database must now name its account - `account` on the
+record, or `?account=` for the whole report - or it no longer finds its database. Load
+balancer and database nodes get new ids; the old ones stay until `GRAPH_TTL` prunes them, or
+start from an empty graph.
+
+---
+
+## 1.28.1
+
+### Roles no longer escalate through techniques only a user can use
+
+**Affects you if** you ingest IAM data with roles that hold `iam:AttachUserPolicy`,
+`iam:PutUserPolicy`, `iam:AddUserToGroup`, `iam:AttachGroupPolicy` or `iam:PutGroupPolicy`.
+
+Those five act on the caller's own user or groups. A role has neither, so holding them lets it
+grant power to users it cannot act as - it does not escalate. The engine drew `CAN_ESCALATE_TO`
+account-admin at 0.9 for such roles, and `redteam` agreed with it, since AWS does allow the
+actions. Both now skip those techniques for roles. A role that can also act as a user - by
+minting its keys or setting its password - still escalates, through that technique.
+
+What to do: the AWS connector's IAM pull is a complete snapshot and retracts the old edges at its
+next run. An IAM dump you upload is a partial observation unless sent with `?snapshot=<scope>`,
+so its old edges stay until `GRAPH_TTL` prunes them; re-send it with `?snapshot=` or start from
+an empty graph.
+
+### A guess never replaces a fact, and Custodian prices the instance → role step like the network feed
+
+Since 1.28.0 Custodian and the network feed meet on the same instance and role, and both write
+the `ASSUMES` step between them. Custodian used a flat 0.8 (0.4 when guessed); the network feed
+prices it from `HttpTokens` (0.6 with IMDSv2 required, 0.9 otherwise). The last write won, so the
+step depended on arrival order, and a Custodian guess could overwrite the network feed's stated
+join at half its probability. Custodian now reads `MetadataOptions.HttpTokens` and prices the
+step the same way (a guess at half of that), and every store keeps a stated edge when an
+inferred one lands on it. Nothing to do: the next ingest of either feed rewrites the step.
+
+---
+
+## 1.28.0
+
+### The same role, instance and cluster object is one node, and two that share a name are two
+
+**Affects you if** you ingest Cloud Custodian bundles, Kubernetes dumps with namespaced Roles,
+or Kubernetes dumps from more than one cluster.
+
+Five identity errors produced wrong routes, three of them routes that do not exist:
+
+- **Custodian keyed roles on their name**; the IAM, network and SSO feeds key them on their ARN.
+  The same role was two nodes, and an escalation found by the IAM feed was out of reach of the
+  instance Custodian found. Worse, an AWS role named like a Kubernetes ClusterRole - `admin`,
+  `edit`, `view` - merged with it, and a namespace admin appeared to reach the account's S3 data.
+  Roles are now keyed on their ARN.
+- **Custodian read an instance's profile name as its role's name.** A profile named differently
+  from its role - common with Terraform and CloudFormation - led the instance to a role nobody
+  had defined, and its routes disappeared. The role now comes from `aws.iam-profile` resources
+  in the bundle; without them it is guessed to share the profile's name, and that join is marked
+  as inferred and weighs half (0.4 instead of 0.8).
+- **Custodian keyed an instance without its account**, the network feed with it: the same
+  instance was two nodes when both ran. It now takes the bundle's `account_id`.
+- **A namespaced Role was keyed on its name.** A harmless `deployer` in one namespace became
+  the `deployer` that can create pods in another, and inherited its route to cluster-admin.
+  Roles are now keyed `namespace/name`; ClusterRoles keep their name.
+- **Kubernetes ids carried no cluster.** Two clusters' `prod/web-sa` were one node, so a route
+  could enter one cluster and end in another's cluster-admin. A dump sent with `?cluster=` is
+  now keyed with it; one sent without keeps the ids it always had.
+
+What to do:
+
+1. **Add an `aws.iam-profile` policy to your Custodian bundle** (see
+   [onboarding](manual/onboarding.md#cloud-custodian-cloud-inventory--iam)), or the joins from
+   instances to roles are marked as inferred.
+2. **More than one cluster: send each dump with `?cluster=<name>`,** and give the merge gate the
+   same name - `cluster:` on the Action, `-cluster` on the CLI. A manifest sent under no name, or
+   another one, meets nothing in the estate and passes as clean.
+3. **Clear the nodes keyed the old way.** Custodian bundles and most Kubernetes dumps are partial
+   observations, which nothing retracts by omission, so the old role, instance and service
+   account nodes stay - with the wrong routes through them - until staleness pruning removes
+   them. Set `GRAPH_TTL` to a few feed cycles (it removes what no source has reported within
+   it), or start from an empty graph and ingest again.
+4. **Routes through these nodes get new ids**, because a route's id is built from its nodes.
+   Suppressions and tickets recorded on the old ids no longer match; triage those routes again.
+
+---
+
+## 1.27.2
+
+### One CVE counts once in the risk figure
+
+**Affects you if** you track the risk figures - a sensitive asset's compromise probability,
+the chance that any is reached, the risk a what-if or a fix removes - or alert on them.
+
+A CVE that a scanner reports on several packages of one image - Debian ships OpenSSL as
+`libssl3` and `openssl`, glibc as `libc6` and `libc-bin` - was reached over several edges, and
+the risk simulation drew each of them independently: two packages gave an attacker two chances
+at one vulnerability, so a CVE at 50% counted as 75%. Every edge into a CVE now carries that
+CVE as its shared cause (`weight_cause`), as a feed could always declare, and those edges hold
+or fail together.
+
+- Compromise probabilities, and with them the risk a fix removes, fall where one CVE spans
+  several packages. Elsewhere they can move within their sampling noise: an edge into a CVE
+  now draws from the CVE's random stream rather than its own.
+- Path scores and priorities do not move: a route enters a CVE once. Each hop into a CVE now
+  names it as its cause, and alternative routes carry the same.
+- A `weight_cause` your feed sends still wins over the one inferred.
+
+---
+
+## 1.25.0
+
+### P1 means "act now", and red-team verdicts move a route
+
+**Affects you if** you triage by band (P1/P2/P3), read `priority` or `priorityLabel` from
+the API or the MCP tools, or alert on P1 counts.
+
+A route with a runtime alert into AdministratorAccess used to read P2: the blended priority
+weighs exploitability at a third and could not reach P1 without a KEV entry. Now:
+
+- **A fact about the route makes it P1**: a runtime alert on it, an asset open to anyone, a
+  KEV weakness on a route an attacker is likely to complete, or a likely route (≥ 80%, on
+  evidence rather than default weights) into a high-value asset. `priorityReason` (new)
+  says which. Every P1 path sits at 70 plus 30% of its blended priority, so the band keeps
+  an order and a natural P1 of 76 now reads 92.8.
+- **Red-team and BAS verdicts re-band a route where paths are listed**
+  (`attackPaths`, the dashboard, the MCP tools): confirmed → P1; refuted → P3, unless a
+  runtime alert or open access contradicts the test - then it stays and says the evidence
+  conflicts. The Priority recorded with a verdict, which grades the triage order, still
+  contains none.
+- **Expect more P1s** where routes are runtime-confirmed or tested; expect refuted routes
+  at the bottom. The dashboard no longer re-sorts refuted routes itself.
+
+### Corrected ATT&CK mapping
+
+`AFFECTS` (a library has a CVE) and `DEPENDS_ON` (an image ships a library) no longer carry a
+technique: they are facts about software, not attacker actions. An exploit is **T1190**
+(initial access) until the attacker is inside, then **T1210** (lateral movement), and the
+exposure before an exploit carries no technique of its own. `CAN_ESCALATE_TO` is
+**T1098.003** (Account Manipulation: Additional Cloud Roles), no longer T1078.004. Anything
+that stored or keyed on the old technique ids per hop will see different ones.
+
+### Calibration reads that could not be trusted
+
+`brier_recalibrated` is measured out of sample at every size - leave-one-out below 20
+outcomes, where it was the in-sample fit and read a perfect 0.000 on a dozen points. Below 30
+outcomes the Trust page headlines "Not enough outcomes yet" with the direction beside it, and
+an AUC below its floor shows the counts it rests on instead of an interval.
+
+**Action:** none; nothing to configure. Check anything that alerts on P1 counts or keys on
+per-hop ATT&CK ids.
+
+## 1.24.0
+
+### The chart's bus authenticates and keeps its stream, and its database password is no longer shared
+
+**Affects you if** you install with the Helm chart.
+
+The chart's NATS accepted any client, so any pod that could reach it published events straight
+into the graph - past the ingest webhook's signature check - or deleted the stream. It kept that
+stream on an emptyDir, so a restart lost every queued event. And the bundled Postgres used the
+password `perspective` on every install.
+
+What changes on `helm upgrade`:
+
+- **NATS requires a user and password.** The chart generates the password into a Secret of its
+  own (`<release>-perspectivegraph-nats-auth`), gives it to the backend, and keeps it across
+  upgrades. NATS and the backend both roll during the upgrade, and ingest pauses until both are
+  up. An **external** NATS is untouched unless you set `nats.auth.user` and `nats.auth.password`
+  (or `nats.auth.existingSecret`); the backend reads `NATS_USER`/`NATS_PASSWORD` in any
+  deployment.
+- **NATS is a StatefulSet with a 2 GiB volume** (`nats.persistence`). The upgrade replaces the
+  Deployment, so events still queued in the old pod are lost this once - as every NATS restart
+  lost them before. The volume needs a default StorageClass, as the bundled Postgres's already
+  does; `nats.persistence.enabled: false` keeps the emptyDir.
+- **`postgres.auth.password` defaults to empty.** A new install gets a random password. An
+  existing one keeps the password in its Secret - `perspective` unless you set one - because
+  Postgres reads it only when it first creates its data directory. To rotate it, `ALTER ROLE`
+  in the database, then set `postgres.auth.password`.
+- **`secrets.existingSecret` works for the bundled Postgres.** Its pod named the chart's own
+  Secret, which does not exist when you bring yours, so it could not start. It now reads yours,
+  as the backend always did.
+- **`networkPolicy`**: only the backend may reach the bundled NATS and Postgres. Off by
+  default, on in `values-production.yaml`; `backendFrom` also closes the backend to all but the
+  dashboard and the peers you name.
+
+**Action if you render with `helm template`** (Argo CD, Flux): a render without the cluster
+cannot read the existing Secrets, so it would draw new passwords on every sync - and a new
+Postgres password locks the backend out of the database it already has. Before upgrading, set
+`postgres.auth.password` to the current one (`perspective` if you never set it) and
+`nats.auth.password`, or bring both through `secrets.existingSecret` and
+`nats.auth.existingSecret`. An external Postgres now needs its password set explicitly there
+too.
+
+**Action to keep the old behaviour** (not recommended): `nats.auth.enabled: false`,
+`nats.persistence.enabled: false`.
+
+## 1.23.0
+
+### The graph forgets what its sources stop reporting
+
+**Affects you if** you ingest Trivy or Semgrep reports, run the AWS connector, or rely on
+something staying in the graph after its source stopped listing it.
+
+Until now the only way out of the graph was `GRAPH_TTL`, off by default, so a CVE fixed in an
+image, an instance terminated or a role deleted stayed - with the attack paths through it -
+until someone pruned. The engine now records who asserted each node and edge. When a source
+that describes a scope *in full* sends that scope again, whatever it said before and no longer
+says is withdrawn, once the whole ingest has landed. An element leaves the graph when no source
+asserts it any more.
+
+What changes:
+
+- **Trivy** scans of an image by reference, **Semgrep** reports with `?repo=`, and the **AWS
+  connector** (per account; the network per account and region) are complete snapshots
+  without any change on your side. A fixed CVE disappears at the next scan.
+- **Everything else is unchanged** unless you say so with `?snapshot=<scope>` on the ingest
+  webhook - `?snapshot=cluster:prod` on a dump of the whole cluster. Name only what you
+  really send in full: what the scope omits is removed.
+- **A Trivy scan filtered by severity or fixability** is complete for its filter only. If
+  one pipeline sends the same image filtered and another unfiltered, they now undo each
+  other's findings: send the filtered one with `?snapshot=none`.
+- **A pull request's scan never removes anything**, and `?snapshot=` together with
+  `slug`/`sha`/`pr` is refused with `400`.
+- **Elements already in the graph** when you upgrade are never removed this way - nothing
+  recorded who sent them - only by `GRAPH_TTL`. To clean up leftovers from before, enable
+  `GRAPH_TTL` for a cycle, or re-create the graph and let the feeds rebuild it.
+- The Postgres graph gains a provenance table beside the parked edges
+  (`<graph>._pg_provenance`, plus `_pg_removals`). It is created and filled on first
+  write, under the graph's write lock, and needs no migration step. Every write now also
+  records its origin, one row per element per source.
+- With `ANALYZER_INCREMENTAL=true`, the analyzer re-reads the whole graph after any removal,
+  on every replica.
+- The Helm ingress now raises the nginx-based controllers' 1 MiB request-body limit to the
+  32 MiB the backend accepts, for `/ingest` and `/gate` (`ingress.maxBodySize`). A body-size
+  annotation you set yourself wins.
+
+**Action to keep the old behaviour:** `GRAPH_SWEEP=false` (Helm `graph.sweep: false`): nothing
+is removed except by `GRAPH_TTL`.
+
+## 1.22.0
+
+### The merge gate counts what the change adds, and writes nothing
+
+**Affects you if** you run the merge gate - the GitHub Action, `perspectivegraph gate`, or
+the Trivy plugin.
+
+The gate used to count every critical path through an asset stamped with the commit. A pull
+request that rescanned an image already in production, or re-rendered a deployment's
+manifests, carried the commit onto assets that were on routes long before it - and every one
+of those routes blocked it: in the demo lab, nine paths where the change itself opened two.
+It now applies the report to a copy of the estate and counts only the routes the change
+**opens or makes likelier**. The routes it merely touches are reported (`preexisting`) and
+do not count. Nothing is written: the comparison runs on `POST /gate/impact`, on the API
+port, with the bearer token.
+
+What changes for a running pipeline:
+
+- **Fewer red checks**, by design: the ones that remain are routes the change caused.
+  `max-critical` now counts those.
+- **Server mode no longer ingests the report.** The live graph does not record a pull
+  request's scan unless you ask: `persist: true` (CLI `-persist`) sends it to the webhook
+  after the verdict. The engine's own pull-request comments and commit status are driven by
+  what is ingested, so they need `persist` - or the webhook step you already had.
+- **Server mode needs `token`** for the comparison if API auth is on (the comparison is an
+  authenticated API call, refused to anonymous callers on a public instance). `ingest` and
+  `hmac-secret` are needed only with `persist` or `attribution: commit`.
+- **Local mode** compares with the estate you give it. Add `base-reports` - the scan of what
+  runs now - or the routes through the scanned image count as the change's, since the estate
+  knows none of its findings.
+- **A proxy in front of the API** must pass `/gate/` - the bundled dashboard nginx and the
+  Helm ingress do - and let a report through: raise an ingress controller's 1 MiB body limit
+  (ingress-nginx: `nginx.ingress.kubernetes.io/proxy-body-size: 32m`), as `/ingest` already
+  needed.
+
+**Action to keep the old behaviour:** `attribution: commit` (CLI `-attribution commit`). The
+gate also falls back to it by itself - saying so in the log and in the `attribution` output -
+when there is no report to compare, or the engine predates 1.22. A gate binary older than
+1.22 under the new action runs per commit with a warning. `prVerdict` is unchanged.
+
+### The engine's commit status and PR comments count what the gate counts
+
+**Affects you if** the engine itself posts to your pull requests - `GITHUB_TOKEN` or
+`GITLAB_TOKEN` set, with `REPO_ALLOWLIST`.
+
+The commit status `perspectivegraph/attack-paths` and the PR/MR comments counted every critical
+path through an asset stamped with the commit, like the gate before this release. They now
+apply the gate's rule, comparing each analysis pass with the one before it. A route that is new,
+or likelier, belongs to the pull-request commits on it that arrived in between. A route that was
+already there when a commit arrived gets no comment and does not turn its status red, and the
+status description says how many there were. A route that appears later through a commit's
+assets belongs to the pull request that arrived with it. If none did, it counts against the
+commits already on it, as "since this change arrived".
+
+What changes:
+
+- **Fewer red statuses and fewer comments**, by design, and the words change: "N critical
+  attack path(s) opened or made likelier by this change". A commit already in the graph when
+  the engine starts - after a restart or an upgrade - has no "before": every route through it
+  counts, and the status says "in the graph before the engine was watching". That is the gate's
+  rule for a commit the engine already holds.
+- **Every commit on a route is judged**, not only the first one found on it. Under the new rule
+  the first could be innocent and the route belong to the second.
+- **A status is posted when it changes**, not re-posted on every analysis pass. GitHub keeps at
+  most 1,000 statuses per commit and context.
+- **Fixed:** with more than one tenant, one tenant's analysis pass posted `success` on another
+  tenant's red commits, and the last route of a tenant closing never cleared its red status.
+
+**Action to keep the old behaviour:** `PR_ATTRIBUTION=commit` (Helm `prAttribution: commit`),
+which restores the old rule and wording. The three changes above stay.
+
+## 1.21.0
+
+Every probability the engine prints is recomputed under corrected rules, so the dashboard's
+numbers move once on upgrade. Nothing needs configuring; what follows is what moves and
+why, so a step in a trend line is not mistaken for a change in the estate.
+
+### A fix is "verified" only when it protects something
+
+**Affects you if** you read the `verified` badge on remediations, `verification` over
+GraphQL, or `whatIf` results.
+
+A fix's verification compared two simulations of 800 trials that drew their random numbers
+independently, and called the fix verified when they differed by 0.05 points - against a
+noise of about ±2.5. A fix cutting an edge that leads nowhere was verified about half the
+time, and a what-if could show the risk *rising* after a cut. Both simulations now run the
+same trials, so the difference is the cut's own effect: never negative, and exactly zero
+when the cut protects nothing.
+
+Verification also reads a new measure, `expectedReduction` - the drop in the expected
+number of sensitive assets compromised - on `verification` and on `whatIf`. The old
+`riskReductionPct` / `riskReduction` (P(any asset compromised)) stays, but it saturates:
+while one asset is compromised in every trial it reads 0 for every other fix.
+
+**Action: none.** Expect some fixes to turn from `verified` to `unverified`: those were
+verified by noise. Every simulated figure also shifts once, within its sampling error,
+because the random draws are new.
+
+### An exposed sensitive asset is compromised only when it is open
+
+**Affects you if** a crown jewel of yours is itself internet-exposed - a public-subnet
+database, a VM with a public IP, a public bucket, a role anyone can assume.
+
+Such an asset counted as compromised in every trial, which pinned the headline risk at
+100% and zeroed every other fix's risk reduction - while the path list showed nothing for
+it. Now:
+
+- **Reachable** (`internet_exposed`: a database behind a password, a VM): not compromised
+  by exposure alone; it counts when an edge reaches it. It is reported by a new CRITICAL
+  invariant, `no-internet-exposed-sensitive-asset`, on the Violations view.
+- **Open to anyone** (new property `public_access`: a bucket whose ACL lets anyone *read*,
+  a role whose trust admits `"*"` without a condition): compromised as it stands, and now
+  listed as a **direct-access path** - the asset alone, no steps, score 1, priority P1 -
+  with a generated S3 public access block as its fix (a role gets a hint: its right trust
+  policy names principals only you know). GraphQL: `AttackPath.directAccess`.
+
+The Cloud Custodian collector now also treats an S3 grant to `AuthenticatedUsers` (any AWS
+account in the world) as public, and a write-only public grant as exposed but not open. An
+IAM trust admitting `"*"` under a `Condition` (e.g. `aws:PrincipalOrgID`) stays exposed but
+not open.
+
+**Action: none.** Expect the headline risk to drop if one exposed asset was pinning it at
+100%, a new CRITICAL violation for each merely reachable one, and a P1 path for each open
+one. Re-ingest Custodian and IAM output for the new property to appear.
+
+### Credential-origin seeds count everywhere
+
+**Affects you if** you run with `SEED_IAM_USERS=true`.
+
+Only the path list started attacks from an identity whose credentials are assumed leaked;
+the risk simulation, the alternative routes (`kShortestPaths`) and the database path finder
+(`ANALYZER_DB_PATHS=true`) started from the internet alone, so that lens raised the path
+count and left the risk figure untouched. They now agree. **Action: none;** with the lens
+on, expect the risk figure to rise to include those routes.
+
+### The attacker-profile figures are anchored on each hop's probability
+
+**Affects you if** you read `mixtureScore`, `posteriorMean`, `scoreCiLow`/`scoreCiHigh`,
+`profileScores`, `mixtureCompromiseProbability` or `profileCompromise`.
+
+The mixture treated a hop's probability as the "criminal" profile's, so with the default
+weak-attacker-heavy priors every figure was dragged below its inputs: a single hop at 0.9
+read 0.78, and a two-hop CloudGoat route fell from 81% to 64% under a lens described as
+adding correlation. The profiles are now anchored so that, averaged, they give back each
+hop's own probability: one hop reads exactly its probability, and a path reads between its
+independent score and its weakest hop. `ATTACKER_PROFILE_PRIORS` now changes the spread
+between profiles, not the level. **Action: none;** expect these figures to rise toward
+`score`. `score`, `priority` and the calibration grades are unaffected.
+
+### Narrower credible bands, and two properties that finally add up
+
+**Affects you if** you read `sensitivityLow`/`sensitivityHigh`, or your feeds set
+`evidence_count` or `weight_cause` on edges.
+
+- The risk figure's credible band carried about ±4 points of sampling noise whatever the
+  inputs; it now measures the inputs alone, so bands narrow where the evidence is strong.
+- `evidence_count` replaced the evidence a hop's basis carries instead of adding to it: a
+  KEV hop with one sighting came out *less* certain than a guess. It now adds.
+- Hops sharing a `weight_cause` count once, at the weakest, in the path score - as the
+  risk simulation always sampled them - and set `correlatedHops`.
+- Alternative routes (`kShortestPaths`) now carry the interval, mixture, upper bound and
+  join provenance a critical path does.
+
+**Action: none.**
+
 ## 1.20.0
 
 ### Ingest requests can be signed v2, and v1 can be turned off
@@ -477,7 +1389,7 @@ outside the ontology: node "n": unknown label "MyCustomThing"
 ```
 
 Map your events onto the labels and edge types listed in
-[MANUAL §5](MANUAL.md). If you need a value that is not there, open an issue - adding one
+[the manual](manual/how-it-works.md#the-ontology). If you need a value that is not there, open an issue - adding one
 is a minor release, and a local string that only worked on one backend was never portable.
 
 ### An `apps`-scoped principal can no longer act outside its applications

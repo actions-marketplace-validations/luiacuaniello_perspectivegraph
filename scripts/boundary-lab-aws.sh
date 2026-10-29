@@ -154,6 +154,8 @@ for role in "$UNBOUNDED" "$BOUNDED"; do
     --policy-name privesc --policy-document "$PRIVESC_POLICY" >/dev/null
 done
 say "  both roles granted the SAME policy: iam:AttachUserPolicy, iam:PutUserPolicy, iam:CreateAccessKey on *"
+# The first two are user techniques a role cannot turn on itself, so neither side counts them
+# for a role; the control escalates through iam:CreateAccessKey.
 
 # IAM is eventually consistent; a simulation run immediately after creation can still
 # read the pre-creation state and would report a misleading answer.
@@ -163,7 +165,7 @@ sleep 12
 
 say ""
 say "── ENGINE vs AWS ────────────────────────────────────────────"
-say "  Both roles hold iam:AttachUserPolicy on * - a textbook privesc primitive - and"
+say "  Both roles hold iam:CreateAccessKey on * - a textbook privesc primitive - and"
 say "  differ only in the boundary. The engine is run over this very account (live"
 say "  connector, read-only) and AWS is asked with SimulatePrincipalPolicy; the two"
 say "  verdicts go side by side. Before the boundary fix the engine called BOTH roles"
@@ -172,10 +174,18 @@ say ""
 
 cd "$(dirname "$0")/../backend"
 status=0
+ROWS=$(mktemp)
 AWS_PROFILE="$PROFILE" CGO_ENABLED=0 go run ./cmd/perspectivegraph redteam \
-  -region "$REGION" -compare \
+  -region "$REGION" -compare -record "$ROWS" \
   -principal "arn:aws:iam::${ACCOUNT}:role/${UNBOUNDED},arn:aws:iam::${ACCOUNT}:role/${BOUNDED}" \
   2>&1 | sed 's/^/  /' || status=$?
+# The record the dashboard's Accuracy page shows, disagreements included.
+if [ -s "$ROWS" ]; then
+  python3 ../scripts/lab-record.py --lab boundary-lab-aws \
+    --title "IAM permissions boundaries: an escalation the boundary blocks, and its control" \
+    --command "make boundary-lab-aws" --region "$REGION" --cost "free" --rows "$ROWS"
+fi
+rm -f "$ROWS"
 
 say ""
 say "─────────────────────────────────────────────────────────────"

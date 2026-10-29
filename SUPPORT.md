@@ -13,6 +13,7 @@ the New Issue page actually offers.
 | You have | Go to |
 |---|---|
 | a question, an idea, or "is this supposed to work like this?" | [Discussions](https://github.com/luiacuaniello/perspectivegraph/discussions) |
+| tried it, and something to say about how it went - what worked, what didn't, where you got stuck | [the feedback thread](https://github.com/luiacuaniello/perspectivegraph/discussions/286) |
 | something that looks like a bug | the **Bug report** issue template |
 | a `redteam -compare` run - a disagreement with AWS, or a clean run | the **Field report: engine vs AWS** issue template |
 | a feature or a change in behaviour to propose | the **Feature request** issue template - and read the [roadmap](ROADMAP.md) first, so we can agree on the shape before you write code |
@@ -25,7 +26,9 @@ closed, and "how do I model a shared VPC" is a thing other people search for lat
 
 Four lines that turn most reports into something answerable on the first reply:
 
-1. **The version** - the image digest or tag, or `git rev-parse HEAD` if you built it.
+1. **The version** - what `perspectivegraph version` prints, or the first line of the
+   backend's log (`perspectivegraph starting version=...`); before 1.37, the image tag or
+   digest, or `git rev-parse HEAD` if you built it.
 2. **Which stack** - `make demo`, Docker Compose, or Helm on a real cluster - and the
    graph backend (in-memory or Apache AGE), because several behaviours differ between them.
 3. **What you expected and what happened**, ideally as the request you sent and the

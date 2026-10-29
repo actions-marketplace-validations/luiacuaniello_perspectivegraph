@@ -10,9 +10,27 @@ import (
 	"github.com/luiacuaniello/perspectivegraph/pkg/ontology"
 )
 
-type recordingSink struct{ calls int }
+type recordingSink struct {
+	calls   int
+	tenants []string
+	paths   []int
+}
 
-func (r *recordingSink) OnCriticalPaths(context.Context, []AttackPath) { r.calls++ }
+func (r *recordingSink) OnCriticalPaths(_ context.Context, tenant string, paths []AttackPath) {
+	r.calls++
+	r.tenants = append(r.tenants, tenant)
+	r.paths = append(r.paths, len(paths))
+}
+
+type recordingObserver struct {
+	passes int
+	nodes  []int
+}
+
+func (r *recordingObserver) ObservePass(_ string, snap graph.Snapshot, _ []AttackPath) {
+	r.passes++
+	r.nodes = append(r.nodes, len(snap.Nodes))
+}
 
 type fakeLeader struct{ leader bool }
 
@@ -66,6 +84,68 @@ func TestSideEffectsGatedByLeadership(t *testing.T) {
 	svc2.runTenant(ctx, graph.DefaultTenant)
 	if lead.calls != 1 {
 		t.Errorf("leader should post once, sink fired %d times", lead.calls)
+	}
+}
+
+// The observer keeps state built from the sequence of passes - what each commit found
+// when it arrived - so it must see every pass on every replica: a follower that became
+// leader with an empty observer would judge every commit as if it had just arrived.
+func TestObserverSeesEveryPassOnEveryReplica(t *testing.T) {
+	ctx := context.Background()
+	mgr, err := graph.NewManager(ctx, func(context.Context, string) (graph.Store, error) { return memory.New(), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := mgr.For(ctx, graph.DefaultTenant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedOnePath(t, store)
+
+	obs, sink := &recordingObserver{}, &recordingSink{}
+	NewService(mgr, time.Minute, sink).WithLeader(fakeLeader{leader: false}).WithPassObserver(obs).
+		runTenant(ctx, graph.DefaultTenant)
+	if obs.passes != 1 || obs.nodes[0] != 2 {
+		t.Errorf("a follower's observer saw %d pass(es) %v, want 1 pass of the 2-node graph", obs.passes, obs.nodes)
+	}
+	if sink.calls != 0 {
+		t.Errorf("a follower's sink fired %d times", sink.calls)
+	}
+}
+
+// A status that went red on a route has to hear that the route is gone. The sink used to
+// be skipped on a pass with no paths, so when the last route closed, the check stayed red.
+// And it has to know whose pass it is: its state is per tenant, and a pass of one tenant
+// must not clear another's.
+func TestSinkHearsTheTenantAndAPassWithNoPaths(t *testing.T) {
+	ctx := context.Background()
+	mgr, err := graph.NewManager(ctx, func(context.Context, string) (graph.Store, error) { return memory.New(), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := mgr.For(ctx, "acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedOnePath(t, store)
+
+	sink := &recordingSink{}
+	svc := NewService(mgr, time.Minute, sink)
+	svc.runTenant(ctx, "acme")
+	// The role stops being a sensitive asset, so the route stops being a critical path.
+	if err := store.UpsertNode(ctx, ontology.Node{ID: "role", Label: ontology.LabelIAMRole, Name: "admin",
+		Properties: map[string]any{ontology.PropCrownJewel: false}}); err != nil {
+		t.Fatal(err)
+	}
+	svc.runTenant(ctx, "acme")
+
+	if sink.calls != 2 || sink.paths[0] != 1 || sink.paths[1] != 0 {
+		t.Fatalf("sink heard %d pass(es) with %v path(s), want 2 passes: 1 path, then none", sink.calls, sink.paths)
+	}
+	for _, tn := range sink.tenants {
+		if tn != "acme" {
+			t.Errorf("sink heard tenant %q, want acme", tn)
+		}
 	}
 }
 
@@ -164,4 +244,52 @@ func pathScores(paths []AttackPath) map[string]float64 {
 		m[p.ID] = p.Score
 	}
 	return m
+}
+
+// A delta carries no deletions, so an incremental analyzer that only patched its cache
+// would keep reporting a route through an asset a complete snapshot has retracted - on
+// every replica, until the periodic full read. The removal epoch makes it rebuild.
+func TestIncrementalAnalyzerSeesARetractedAsset(t *testing.T) {
+	ctx := context.Background()
+	mgr, err := graph.NewManager(ctx, func(context.Context, string) (graph.Store, error) { return memory.New(), nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, _ := mgr.For(ctx, graph.DefaultTenant)
+	taken := time.Now().Add(-time.Minute)
+	for _, id := range []string{"a", "b"} {
+		if err := graph.ApplyEvent(ctx, store, ontology.Event{Source: "cloudnet", ObservedAt: taken,
+			Snapshot: &ontology.Snapshot{Scope: "aws:1/eu-west-1", Taken: taken},
+			Nodes: []ontology.Node{
+				{ID: "lb-" + id, Label: ontology.LabelLoadBalancer, Name: "lb-" + id, Properties: map[string]any{ontology.PropInternetExposed: true}},
+				{ID: "db-" + id, Label: ontology.LabelDatabase, Name: "db-" + id, Properties: map[string]any{ontology.PropCrownJewel: true}}},
+			Edges: []ontology.Edge{{Type: ontology.EdgeExposes, From: "lb-" + id, To: "db-" + id, ExploitProbability: 0.9}},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewService(mgr, time.Minute, nil).WithIncremental(true)
+	svc.runTenant(ctx, graph.DefaultTenant)
+	if got := len(svc.Latest(graph.DefaultTenant)); got != 2 {
+		t.Fatalf("first pass: %d paths, want 2", got)
+	}
+
+	// The next pull lists only "a": "b"'s load balancer and database are retracted.
+	now := time.Now()
+	if err := graph.ApplyEvent(ctx, store, ontology.Event{Source: "cloudnet", ObservedAt: now,
+		Snapshot: &ontology.Snapshot{Scope: "aws:1/eu-west-1", Taken: now},
+		Nodes: []ontology.Node{
+			{ID: "lb-a", Label: ontology.LabelLoadBalancer, Name: "lb-a", Properties: map[string]any{ontology.PropInternetExposed: true}},
+			{ID: "db-a", Label: ontology.LabelDatabase, Name: "db-a", Properties: map[string]any{ontology.PropCrownJewel: true}}},
+		Edges: []ontology.Edge{{Type: ontology.EdgeExposes, From: "lb-a", To: "db-a", ExploitProbability: 0.9}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if stats, err := store.Sweep(ctx, "cloudnet", "aws:1/eu-west-1", now); err != nil || stats.Nodes != 2 {
+		t.Fatalf("sweep: %+v %v", stats, err)
+	}
+	svc.runTenant(ctx, graph.DefaultTenant)
+	if got := len(svc.Latest(graph.DefaultTenant)); got != 1 {
+		t.Fatalf("after the retraction: %d paths, want 1 - the cache kept the retracted route", got)
+	}
 }

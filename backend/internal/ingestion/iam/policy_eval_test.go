@@ -20,7 +20,7 @@ func TestExplicitDenyBeatsAllow(t *testing.T) {
 	if !a.Allows("iam:PutUserPolicy") {
 		t.Error("the Deny is action-specific; other iam actions must stay allowed")
 	}
-	for _, m := range detectPrivesc(a) {
+	for _, m := range detectPrivesc(a, asUser) {
 		if strings.HasPrefix(m.Name, "iam:AttachUserPolicy") {
 			t.Errorf("denied action must not yield a primitive: %s", m.Name)
 		}
@@ -46,7 +46,7 @@ func TestBlanketDenyRevokesAdmin(t *testing.T) {
 // is still real (self-privesc is a genuine technique) but must be marked, so the
 // caller can score it below an account-wide grant instead of asserting it.
 func TestResourceScopedGrantIsFlagged(t *testing.T) {
-	broad := detectPrivesc(actionSet{}.add("iam:AttachUserPolicy"))
+	broad := detectPrivesc(actionSet{}.add("iam:AttachUserPolicy"), asUser)
 	if len(broad) == 0 {
 		t.Fatal("account-wide grant must yield a primitive")
 	}
@@ -54,7 +54,7 @@ func TestResourceScopedGrantIsFlagged(t *testing.T) {
 		t.Error("account-wide grant must not be flagged resource-scoped")
 	}
 
-	scoped := detectPrivesc(actionSet{}.addScoped("iam:AttachUserPolicy"))
+	scoped := detectPrivesc(actionSet{}.addScoped("iam:AttachUserPolicy"), asUser)
 	if len(scoped) == 0 {
 		t.Fatal("a resource-scoped grant is still a real primitive, not a miss")
 	}
@@ -63,7 +63,7 @@ func TestResourceScopedGrantIsFlagged(t *testing.T) {
 	}
 
 	// A two-action primitive is account-wide only if BOTH actions are.
-	mixed := detectPrivesc(actionSet{}.add("iam:PassRole").addScoped("lambda:CreateFunction"))
+	mixed := detectPrivesc(actionSet{}.add("iam:PassRole").addScoped("lambda:CreateFunction"), asUser)
 	if len(mixed) == 0 {
 		t.Fatal("mixed grant must still match the PassRole+Lambda primitive")
 	}
@@ -163,4 +163,59 @@ func TestPolicyEvaluationEndToEnd(t *testing.T) {
 			t.Errorf("probability = %.2f, want %.2f", e.ExploitProbability, privescProb)
 		}
 	})
+}
+
+// The policy reader said it erred toward reporting too much. Two shapes made it report
+// too little: an Allow written with NotAction was not read at all, and a Deny under a
+// condition was applied as if it always held. Each case below is one policy shape, with
+// what the engine must say about a role holding it.
+func TestPolicyShapesTheReaderUsedToMisread(t *testing.T) {
+	role := func(stmts string) string {
+		return `{"RoleDetailList":[{"RoleName":"r","Arn":"arn:aws:iam::1:role/r",
+		  "RolePolicyList":[{"PolicyName":"p","PolicyDocument":{"Statement":[` + stmts + `]}}]}]}`
+	}
+	const attach = `{"Effect":"Allow","Action":"iam:AttachRolePolicy","Resource":"*"}`
+	const withoutMFA = `"Condition":{"BoolIfExists":{"aws:MultiFactorAuthPresent":"false"}}`
+	for _, c := range []struct {
+		name        string
+		stmts       string
+		escalates   bool
+		prob        float64
+		conditional bool
+	}{
+		{"an Allow of everything but one action grants the rest",
+			`{"Effect":"Allow","NotAction":"iam:DeleteUser","Resource":"*"}`, true, privescProb, false},
+		{"an Allow of everything but IAM grants no IAM technique",
+			`{"Effect":"Allow","NotAction":["iam:*","organizations:*"],"Resource":"*"}`, false, 0, false},
+		{"a Deny only without MFA leaves the escalation, unverified",
+			attach + `,{"Effect":"Deny","Action":"iam:*","Resource":"*",` + withoutMFA + `}`, true, conditionalDenyProb, true},
+		{"an unconditional Deny still removes it",
+			attach + `,{"Effect":"Deny","Action":"iam:*","Resource":"*"}`, false, 0, false},
+		{"a conditional Deny on one technique leaves another at full weight",
+			attach + `,{"Effect":"Allow","Action":["iam:PassRole","lambda:CreateFunction"],"Resource":"*"}` +
+				`,{"Effect":"Deny","Action":"iam:AttachRolePolicy","Resource":"*",` + withoutMFA + `}`, true, privescProb, false},
+		{"a Deny on all but some resources is not account-wide",
+			attach + `,{"Effect":"Deny","Action":"iam:*","NotResource":"arn:aws:iam::1:role/sandbox-*"}`, true, privescProb, false},
+		{"a Deny of everything but S3 is not applied",
+			attach + `,{"Effect":"Deny","NotAction":"s3:*","Resource":"*"}`, true, privescProb, false},
+		{"an administrator under a conditional Deny of everything is unverified",
+			`{"Effect":"Allow","Action":"*","Resource":"*"},{"Effect":"Deny","Action":"*","Resource":"*",` + withoutMFA + `}`,
+			true, conditionalDenyProb, true},
+	} {
+		_, edges := parseRoles(t, role(c.stmts))
+		e, ok := edges["r"]
+		if ok != c.escalates {
+			t.Errorf("%s: escalates = %v, want %v (%v)", c.name, ok, c.escalates, e.Properties["primitives"])
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if e.ExploitProbability != c.prob {
+			t.Errorf("%s: p = %.2f, want %.2f", c.name, e.ExploitProbability, c.prob)
+		}
+		if got, _ := e.Properties[propDenyConditional].(bool); got != c.conditional {
+			t.Errorf("%s: %s = %v, want %v", c.name, propDenyConditional, got, c.conditional)
+		}
+	}
 }

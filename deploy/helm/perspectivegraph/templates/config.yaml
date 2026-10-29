@@ -1,4 +1,4 @@
-{{- if and .Values.secrets.create (not .Values.secrets.existingSecret) }}
+{{- if and (or .Values.secrets.create .Values.secrets.generate) (not .Values.secrets.existingSecret) }}
 # Skipped when secrets.existingSecret is set: bring your own Secret (External
 # Secrets / Sealed Secrets / Vault) carrying these keys, and the backend reads it.
 apiVersion: v1
@@ -9,17 +9,27 @@ metadata:
     {{- include "perspectivegraph.labels" . | nindent 4 }}
 type: Opaque
 stringData:
-  POSTGRES_PASSWORD: {{ .Values.postgres.auth.password | quote }}
+  POSTGRES_PASSWORD: {{ include "perspectivegraph.postgresPassword" . | quote }}
   GITHUB_TOKEN: {{ .Values.github.token | quote }}
   GITLAB_TOKEN: {{ .Values.gitlab.token | quote }}
+  {{- /* An admin token is generated only when OIDC is not the way in, and the single
+       ingest secret only when per-tenant ones are not set. */}}
+  {{- if .Values.auth.oidc.jwksUrl }}
   API_TOKENS: {{ .Values.auth.apiTokens | quote }}
+  {{- else }}
+  API_TOKENS: {{ include "perspectivegraph.generated" (list . "API_TOKENS" .Values.auth.apiTokens "admin-token") | quote }}
+  {{- end }}
+  {{- if .Values.ingest.hmacSecrets }}
   INGEST_HMAC_SECRET: {{ .Values.ingest.hmacSecret | quote }}
+  {{- else }}
+  INGEST_HMAC_SECRET: {{ include "perspectivegraph.generated" (list . "INGEST_HMAC_SECRET" .Values.ingest.hmacSecret "hex") | quote }}
+  {{- end }}
   INGEST_HMAC_SECRETS: {{ .Values.ingest.hmacSecrets | quote }}
   TICKET_WEBHOOK_URL: {{ .Values.ticket.webhookUrl | quote }}
   ANTHROPIC_API_KEY: {{ .Values.ai.apiKey | quote }}
   HF_TOKEN: {{ .Values.ai.hf.token | quote }}
-  STORE_ENCRYPTION_KEY: {{ .Values.crypto.storeEncryptionKey | quote }}
-  EXPORT_SIGNING_KEY: {{ .Values.crypto.exportSigningKey | quote }}
+  STORE_ENCRYPTION_KEY: {{ include "perspectivegraph.generated" (list . "STORE_ENCRYPTION_KEY" .Values.crypto.storeEncryptionKey "hex") | quote }}
+  EXPORT_SIGNING_KEY: {{ include "perspectivegraph.generated" (list . "EXPORT_SIGNING_KEY" .Values.crypto.exportSigningKey "hex") | quote }}
 ---
 {{- end }}
 apiVersion: v1
@@ -35,12 +45,19 @@ data:
   POSTGRES_DB: {{ .Values.postgres.auth.database | quote }}
   # Empty sslMode → disable for the bundled in-cluster Postgres, require for an
   # external one (override with postgres.sslMode, e.g. verify-full).
-  POSTGRES_SSLMODE: {{ .Values.postgres.sslMode | default (ternary "disable" "require" .Values.postgres.enabled) | quote }}
+  {{- /* And verify-full under CloudNativePG: the backend holds the operator's CA, mounted
+       from <cluster>-ca. A template comment, so existing releases render unchanged. */}}
+  {{- $sslDefault := ternary "disable" "require" .Values.postgres.enabled }}
+  {{- if include "perspectivegraph.cnpg" . }}{{ $sslDefault = "verify-full" }}{{ end }}
+  POSTGRES_SSLMODE: {{ .Values.postgres.sslMode | default $sslDefault | quote }}
   AGE_GRAPH_NAME: {{ .Values.postgres.graph | quote }}
   NATS_URL: {{ include "perspectivegraph.natsUrl" . | quote }}
   NATS_STREAM: {{ .Values.nats.stream | quote }}
   NATS_SUBJECT: {{ .Values.nats.subject | quote }}
   NATS_MAX_AGE: {{ .Values.nats.maxAge | quote }}
+  # The user the backend authenticates to NATS as; empty when it sends no credentials.
+  # The password comes from a Secret (see backend.yaml).
+  NATS_USER: {{ ternary .Values.nats.auth.user "" (eq (include "perspectivegraph.natsAuth" .) "yes") | quote }}
   API_ADDR: {{ printf ":%d" (int .Values.service.apiPort) | quote }}
   INGEST_ADDR: {{ printf ":%d" (int .Values.service.ingestPort) | quote }}
   ANALYZER_INTERVAL: {{ .Values.backend.analyzerInterval | quote }}
@@ -51,6 +68,7 @@ data:
   SEED_IAM_USERS: {{ .Values.backend.seedIamUsers | quote }}
   OPENSEARCH_URL: {{ .Values.opensearch.url | quote }}
   REPO_ALLOWLIST: {{ join "," .Values.repoAllowlist | quote }}
+  PR_ATTRIBUTION: {{ .Values.prAttribution | quote }}
   GITHUB_API_URL: {{ .Values.github.apiUrl | quote }}
   GITHUB_DRY_RUN: {{ .Values.github.dryRun | quote }}
   GITLAB_API_URL: {{ .Values.gitlab.apiUrl | quote }}
@@ -86,6 +104,7 @@ data:
   INGEST_HMAC_ACCEPT_V1: {{ .Values.ingest.hmacAcceptV1 | quote }}
   INGEST_RATE_RPS: {{ .Values.auth.ingestRateRps | quote }}
   GRAPH_TTL: {{ .Values.graph.ttl | quote }}
+  GRAPH_SWEEP: {{ .Values.graph.sweep | quote }}
   OIDC_ISSUER: {{ .Values.auth.oidc.issuer | quote }}
   OIDC_AUDIENCE: {{ .Values.auth.oidc.audience | quote }}
   OIDC_JWKS_URL: {{ .Values.auth.oidc.jwksUrl | quote }}
@@ -121,6 +140,14 @@ data:
   AWS_ROLE_ARN: {{ .Values.connectors.aws.roleArn | quote }}
   AZURE_CONNECTOR_MODE: {{ .Values.connectors.azure.mode | quote }}
   AZURE_FIXTURES_DIR: {{ .Values.connectors.azure.fixturesDir | quote }}
+  K8S_CONNECTOR_MODE: {{ .Values.connectors.kubernetes.mode | quote }}
+  {{- if has "kubernetes" .Values.connectors.enabled }}
+  K8S_CLUSTER_NAME: {{ required "connectors.kubernetes.clusterName is required with the kubernetes connector: names repeat across clusters, and on EKS it must be the EKS cluster's name" .Values.connectors.kubernetes.clusterName | quote }}
+  {{- else }}
+  K8S_CLUSTER_NAME: {{ .Values.connectors.kubernetes.clusterName | quote }}
+  {{- end }}
+  K8S_AWS_ACCOUNT: {{ .Values.connectors.kubernetes.awsAccount | quote }}
+  K8S_FIXTURES_DIR: {{ .Values.connectors.kubernetes.fixturesDir | quote }}
   # AI-native layer. The keys (Anthropic + HF token) are in the Secret; these are
   # non-secret tuning for Anthropic (Claude) and the HuggingFace fallback.
   ANTHROPIC_MODEL: {{ .Values.ai.model | quote }}
@@ -147,7 +174,7 @@ data:
   # where a prefix can be removed and checkpointed; the file-backed chain is rotated.
   AUDIT_RETENTION: {{ .Values.auditRetention | quote }}
 {{- end }}
-{{- if .Values.postgres.enabled }}
+{{- if include "perspectivegraph.bundledPostgres" . }}
 ---
 apiVersion: v1
 kind: ConfigMap

@@ -1,0 +1,117 @@
+# The documentation site, https://docs.a3thinker.it.
+#
+# Built from the repository's own Markdown (see site/README.md) on every pull request that
+# touches it, so a broken link or a renamed heading fails the check before it merges - the
+# build validates every internal link and anchor. Published from main only.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "ROADMAP.md"
+      - "SUPPORT.md"
+      - "ADOPTERS.md"
+      - "GOVERNANCE.md"
+      - "docs/**"
+      - "site/**"
+      - "deploy/helm/perspectivegraph/README.md"
+      - "deploy/observability/README.md"
+      - "deploy/redteam-lab/README.md"
+      - "backend/testdata/cloudgoat/README.md"
+      - "CODE_OF_CONDUCT.md"
+      - "MAINTAINERS.md"
+      - ".github/**/*.md"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "README.md"
+      - "SECURITY.md"
+      - "CONTRIBUTING.md"
+      - "ROADMAP.md"
+      - "SUPPORT.md"
+      - "ADOPTERS.md"
+      - "GOVERNANCE.md"
+      - "docs/**"
+      - "site/**"
+      - "deploy/helm/perspectivegraph/README.md"
+      - "deploy/observability/README.md"
+      - "deploy/redteam-lab/README.md"
+      - "backend/testdata/cloudgoat/README.md"
+      - "CODE_OF_CONDUCT.md"
+      - "MAINTAINERS.md"
+      - ".github/**/*.md"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time, and a newer push does not cancel one already publishing.
+concurrency:
+  group: docs-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build and check links
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: ./site
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+        with:
+          # Each page's "last updated" is the last commit to its source file. A shallow clone
+          # has one commit, so the sync script leaves the dates off rather than date every
+          # page today; the whole history is what makes them real.
+          fetch-depth: 0
+      # The same Node as the dashboard's release image - see scripts/node-image.sh.
+      - id: node
+        name: Node version from the release Dockerfile
+        run: |
+          version="$(bash ../scripts/node-image.sh --version)"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ steps.node.outputs.version }}
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+      - run: npm ci --no-audit --no-fund
+      # Fails on any high or critical advisory except one named in audit-exceptions.json,
+      # each with its reason and a date it must be reviewed by (scripts/audit.mjs).
+      - name: npm audit (high/critical)
+        run: node scripts/audit.mjs
+      # Check relative links in Markdown not published by the documentation site.
+      # Offline mode checks local files without requiring external network access.
+      - name: Check links in unpublished Markdown
+        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
+        with:
+          args: --offline "./deploy/helm/perspectivegraph/README.md" "./deploy/observability/README.md" "./deploy/redteam-lab/README.md" "./backend/testdata/cloudgoat/README.md" "./site/README.md" "./CODE_OF_CONDUCT.md" "./MAINTAINERS.md" "./.github/PULL_REQUEST_TEMPLATE.md" "./.github/ISSUE_TEMPLATE/bug_report.md" "./.github/ISSUE_TEMPLATE/feature_request.md"
+          fail: true
+      - name: Build (fails on a broken internal link or anchor)
+        run: npm run build
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+
+  deploy:
+    name: Publish to GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

@@ -12,8 +12,10 @@ export function category(label: string): Category {
   switch (label) {
     case "VirtualMachine":
     case "Container":
+    case "Function":
     case "VPC":
     case "LoadBalancer":
+    case "API":
       return "infra";
     case "Database":
     case "Bucket":
@@ -26,6 +28,7 @@ export function category(label: string): Category {
     case "User":
     case "IAM_Role":
     case "ServiceAccount":
+    case "IdentityProvider":
       return "identity";
     default:
       return "finding"; // CVE / Weakness / Misconfiguration / Secret

@@ -228,14 +228,14 @@ export default function LoginGate({ children }: { children: ReactNode }) {
         {ssoAvailable && (
           <button
             onClick={ssoLogin}
-            className="mt-4 w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-white transition hover:opacity-90"
+            className="mt-4 w-full rounded-lg bg-accent px-3 py-2 text-sm font-medium text-panel transition hover:opacity-90"
           >
             Sign in with SSO
           </button>
         )}
 
         {ssoAvailable && (
-          <div className="my-4 flex items-center gap-3 text-[12px] uppercase tracking-wide text-slate-500">
+          <div className="my-4 flex items-center gap-3 text-[12px] text-slate-500">
             <span className="h-px flex-1 bg-edge" />
             or use a token
             <span className="h-px flex-1 bg-edge" />

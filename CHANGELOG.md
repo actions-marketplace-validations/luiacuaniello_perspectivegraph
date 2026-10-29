@@ -9,6 +9,273 @@ When a release needs you to **do** something - set a new variable, change a requ
 send - that is in [docs/UPGRADING.md](docs/UPGRADING.md). Read it before upgrading; a
 version absent from it needs no action.
 
+## [1.39.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.39.1...v1.39.2) (2026-10-28)
+
+
+### Bug Fixes
+
+* **security:** refuse v1 ingest signatures by default ([#389](https://github.com/luiacuaniello/perspectivegraph/issues/389)) ([2f5938e](https://github.com/luiacuaniello/perspectivegraph/commit/2f5938eaa835d2190dc4dd620d1156c80d4e7207))
+* **security:** require the tenant claim and refuse weak store keys ([#393](https://github.com/luiacuaniello/perspectivegraph/issues/393)) ([48cc5cf](https://github.com/luiacuaniello/perspectivegraph/commit/48cc5cf54d6e83266057643936e5a4ca0cb798a7))
+
+## [1.39.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.39.0...v1.39.1) (2026-10-24)
+
+
+### Bug Fixes
+
+* escape asset names in generated fixes, refresh image bases ([#377](https://github.com/luiacuaniello/perspectivegraph/issues/377)) ([e34f7d6](https://github.com/luiacuaniello/perspectivegraph/commit/e34f7d643dcccfab53df2d0391f489dc18d56ce4))
+* key search and history reads by the normalized tenant ([#379](https://github.com/luiacuaniello/perspectivegraph/issues/379)) ([1c944ff](https://github.com/luiacuaniello/perspectivegraph/commit/1c944ffe871f1cf0bb2412c8e14ae7fe7a73ab6e))
+
+## [1.39.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.38.3...v1.39.0) (2026-10-21)
+
+
+### Features
+
+* **ci:** add a GitLab merge-request gate template ([#366](https://github.com/luiacuaniello/perspectivegraph/issues/366)) ([539655b](https://github.com/luiacuaniello/perspectivegraph/commit/539655b64342f52b9e7e8027a73777ad4c3af7bc))
+
+## [1.38.3](https://github.com/luiacuaniello/perspectivegraph/compare/v1.38.2...v1.38.3) (2026-10-21)
+
+
+### Bug Fixes
+
+* build with Go 1.27.3 for the crypto/x509 advisory GO-2026-6809 ([#374](https://github.com/luiacuaniello/perspectivegraph/issues/374)) ([ada08e5](https://github.com/luiacuaniello/perspectivegraph/commit/ada08e549c6fc1908a192bb98b9706ed63fad83d))
+
+## [1.38.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.38.1...v1.38.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* **dashboard:** build on nginx alpine-slim, clearing two High CVEs ([#367](https://github.com/luiacuaniello/perspectivegraph/issues/367)) ([0ca4419](https://github.com/luiacuaniello/perspectivegraph/commit/0ca441978e6b12ec89b32b82ac737ef0a5ecabc6))
+
+## [1.38.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.38.0...v1.38.1) (2026-10-14)
+
+
+### Bug Fixes
+
+* **chart:** take NATS 2.15.1, and build on distroless Debian 13 ([#356](https://github.com/luiacuaniello/perspectivegraph/issues/356)) ([bc58ae5](https://github.com/luiacuaniello/perspectivegraph/commit/bc58ae5517e783815b189b3c8ea7d884678a6e45))
+
+## [1.38.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.37.0...v1.38.0) (2026-10-12)
+
+
+### Features
+
+* **mcp:** say what each tool returns, and page through the routes ([#354](https://github.com/luiacuaniello/perspectivegraph/issues/354)) ([9166af9](https://github.com/luiacuaniello/perspectivegraph/commit/9166af9844f24fc92c7b3f0ae4c923cd451a87ce))
+
+## [1.37.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.36.0...v1.37.0) (2026-10-10)
+
+
+### Features
+
+* **cli:** help and version, and a running engine names its release ([#352](https://github.com/luiacuaniello/perspectivegraph/issues/352)) ([e289ab4](https://github.com/luiacuaniello/perspectivegraph/commit/e289ab444d5a1fa57f6267ee6dc05a17d99c2c08))
+
+
+### Bug Fixes
+
+* **vm:** build the single-VM Caddy with golang.org/x/net 0.60.0 ([#350](https://github.com/luiacuaniello/perspectivegraph/issues/350)) ([e271cdc](https://github.com/luiacuaniello/perspectivegraph/commit/e271cdcb0b52c1198ae5f8b2107b27cca332bb79))
+
+## [1.36.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.35.1...v1.36.0) (2026-10-09)
+
+
+### Features
+
+* **chart:** run the database under CloudNativePG ([#338](https://github.com/luiacuaniello/perspectivegraph/issues/338)) ([3a887ac](https://github.com/luiacuaniello/perspectivegraph/commit/3a887ac730fc9ad84d9b9bbe6980e909509ab49e))
+* **connector:** read the Kubernetes cluster the engine runs in ([#341](https://github.com/luiacuaniello/perspectivegraph/issues/341)) ([484bcfd](https://github.com/luiacuaniello/perspectivegraph/commit/484bcfd597f1741f462c22085f26c743f9eaa141))
+* deploy the AWS read-only role, generate the chart's credentials, sign ingests from the CLI ([#340](https://github.com/luiacuaniello/perspectivegraph/issues/340)) ([5dccf39](https://github.com/luiacuaniello/perspectivegraph/commit/5dccf39fccc73f275f80175f715ea16cf735a5a9))
+* production on one machine (make prod-init) and live AWS reads f… ([#342](https://github.com/luiacuaniello/perspectivegraph/issues/342)) ([e459320](https://github.com/luiacuaniello/perspectivegraph/commit/e4593203ad93a6fda7846816cda2b8766494f26a))
+
+## [1.35.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.35.0...v1.35.1) (2026-10-09)
+
+
+### Bug Fixes
+
+* **go:** build with Go 1.27.2, which fixes eleven standard library vu… ([#334](https://github.com/luiacuaniello/perspectivegraph/issues/334)) ([7d23c0c](https://github.com/luiacuaniello/perspectivegraph/commit/7d23c0ce017164c558829f100b0859640e77f2ec))
+
+## [1.35.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.34.0...v1.35.0) (2026-10-08)
+
+
+### Features
+
+* **gate:** read load balancers, ECS, API Gateway, EKS and network ACLs in Terraform plans ([#331](https://github.com/luiacuaniello/perspectivegraph/issues/331)) ([eccea60](https://github.com/luiacuaniello/perspectivegraph/commit/eccea601f7c89a5eaf266c93bff2740706b091fd))
+
+
+### Bug Fixes
+
+* **gate:** judge a Terraform plan with the network it does not describe ([#329](https://github.com/luiacuaniello/perspectivegraph/issues/329)) ([16673eb](https://github.com/luiacuaniello/perspectivegraph/commit/16673eb86dae71b715344c9015dfe397cccb2fa3))
+
+## [1.34.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.33.1...v1.34.0) (2026-10-07)
+
+
+### Features
+
+* **gate:** judge a Terraform plan before it is applied ([#327](https://github.com/luiacuaniello/perspectivegraph/issues/327)) ([19cf306](https://github.com/luiacuaniello/perspectivegraph/commit/19cf3069051cc9e9a9f6ca037b3e50cdc6141206))
+
+## [1.33.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.33.0...v1.33.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **dashboard:** say the AWS lab records are the project's own, not checks of the viewer's account ([#324](https://github.com/luiacuaniello/perspectivegraph/issues/324)) ([a353009](https://github.com/luiacuaniello/perspectivegraph/commit/a353009df01530fc22631dd984b2d61c2e50ae17))
+
+## [1.33.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.32.0...v1.33.0) (2026-10-07)
+
+
+### Features
+
+* **remediation:** suggest closing a Lambda function anyone can invoke ([#316](https://github.com/luiacuaniello/perspectivegraph/issues/316)) ([34843ff](https://github.com/luiacuaniello/perspectivegraph/commit/34843ff3b8db7e7ea7029770d7f9b5604ea82060))
+
+
+### Bug Fixes
+
+* **remediation:** never suggest an empty fix for an open Lambda function ([#323](https://github.com/luiacuaniello/perspectivegraph/issues/323)) ([0f188e3](https://github.com/luiacuaniello/perspectivegraph/commit/0f188e3fae1f2a652d156b4352f17f745cf68d41))
+
+## [1.32.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.31.0...v1.32.0) (2026-10-05)
+
+
+### Features
+
+* **dashboard:** show how this version's rules were checked against AWS ([#315](https://github.com/luiacuaniello/perspectivegraph/issues/315)) ([ff36d30](https://github.com/luiacuaniello/perspectivegraph/commit/ff36d3056404a6bf82b9650cfab1215d7e2a707c))
+* **helm:** add a values schema ([#310](https://github.com/luiacuaniello/perspectivegraph/issues/310)) ([45aa54e](https://github.com/luiacuaniello/perspectivegraph/commit/45aa54e8d79b570eb519fddcb88339d49470b75b))
+
+
+### Bug Fixes
+
+* **ingestion:** read the account's S3 Block Public Access, as S3 applies it ([#314](https://github.com/luiacuaniello/perspectivegraph/issues/314)) ([76882f9](https://github.com/luiacuaniello/perspectivegraph/commit/76882f9305fea32b06682c1d5dff52ef121dbd8b))
+
+## [1.31.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.30.0...v1.31.0) (2026-10-04)
+
+
+### Features
+
+* **ingestion:** read API Gateway, the front door of serverless code ([#309](https://github.com/luiacuaniello/perspectivegraph/issues/309)) ([cc5cf64](https://github.com/luiacuaniello/perspectivegraph/commit/cc5cf64e51de2243a88f4b7c635cbb675f17c716))
+
+## [1.30.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.29.1...v1.30.0) (2026-10-03)
+
+
+### Features
+
+* **connector:** read load balancers, the way into most AWS estates ([#307](https://github.com/luiacuaniello/perspectivegraph/issues/307)) ([8575d03](https://github.com/luiacuaniello/perspectivegraph/commit/8575d03113a59d57bce1f705b97e178c2e16a5b0))
+
+## [1.29.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.29.0...v1.29.1) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ingestion:** judge bucket and function policies the way AWS does, checked on a real account ([#300](https://github.com/luiacuaniello/perspectivegraph/issues/300)) ([3e6a458](https://github.com/luiacuaniello/perspectivegraph/commit/3e6a458fb99ba6ec367fdaaf97c34db6a06a3f78))
+
+## [1.29.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.28.3...v1.29.0) (2026-10-02)
+
+
+### Features
+
+* **ingestion:** add GitHub OIDC trusts, port-aware exposure, the EKS-to-AWS bridge, and S3, Lambda and ECS entry points ([#298](https://github.com/luiacuaniello/perspectivegraph/issues/298)) ([9f90934](https://github.com/luiacuaniello/perspectivegraph/commit/9f909340e7a22c475a5654c32146d93ea6beff3c))
+
+## [1.28.3](https://github.com/luiacuaniello/perspectivegraph/compare/v1.28.2...v1.28.3) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ingestion:** read NotAction, never let a conditional Deny hide an escalation, and key Custodian stores by Region ([#296](https://github.com/luiacuaniello/perspectivegraph/issues/296)) ([8250cdf](https://github.com/luiacuaniello/perspectivegraph/commit/8250cdf99b29b0f3a0b59d7337c18149cca12a6a))
+
+## [1.28.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.28.1...v1.28.2) (2026-10-02)
+
+
+### Bug Fixes
+
+* **ingestion:** key SBOM packages, Falco alerts and Custodian load balancers like the other sources ([#294](https://github.com/luiacuaniello/perspectivegraph/issues/294)) ([b84b3e1](https://github.com/luiacuaniello/perspectivegraph/commit/b84b3e15cf051dabd36db728de718340f6fbfc68))
+
+## [1.28.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.28.0...v1.28.1) (2026-10-01)
+
+
+### Bug Fixes
+
+* **ingestion:** roles no longer escalate through user techniques, and a guess never replaces a fact ([#291](https://github.com/luiacuaniello/perspectivegraph/issues/291)) ([9d75b92](https://github.com/luiacuaniello/perspectivegraph/commit/9d75b92124aba8fd0cf79959c33d922c468f218b))
+
+## [1.28.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.27.2...v1.28.0) (2026-10-01)
+
+
+### Features
+
+* **ingestion:** key every identity the way the other sources do, and tell clusters apart ([#288](https://github.com/luiacuaniello/perspectivegraph/issues/288)) ([08f7dc9](https://github.com/luiacuaniello/perspectivegraph/commit/08f7dc964388e976fa3123795bbd564f51e9ac2e))
+
+## [1.27.2](https://github.com/luiacuaniello/perspectivegraph/compare/v1.27.1...v1.27.2) (2026-10-01)
+
+
+### Bug Fixes
+
+* **analyzer:** count one CVE once in the risk figure, wherever a scanner reports it ([#282](https://github.com/luiacuaniello/perspectivegraph/issues/282)) ([c1aa78e](https://github.com/luiacuaniello/perspectivegraph/commit/c1aa78ea37c69ac8ee3e7926e62271667a23e1e4))
+
+## [1.27.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.27.0...v1.27.1) (2026-09-30)
+
+
+### Bug Fixes
+
+* **site:** axe on a phone found every wide table scrollable but unreachable by keyboard, and ([87a37d9](https://github.com/luiacuaniello/perspectivegraph/commit/87a37d9276be249b29a1bc97a1137181c967a86d))
+
+## [1.27.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.26.0...v1.27.0) (2026-09-30)
+
+
+### Features
+
+* **dashboard:** show the predictions waiting for an outcome, and open tooltips on a tap ([#278](https://github.com/luiacuaniello/perspectivegraph/issues/278)) ([3d7fc62](https://github.com/luiacuaniello/perspectivegraph/commit/3d7fc62401e9499390ac787925399d6377615277))
+
+
+### Bug Fixes
+
+* **dashboard:** the info tooltips never opened on an iPhone. They showed on hover and focus, ([3d7fc62](https://github.com/luiacuaniello/perspectivegraph/commit/3d7fc62401e9499390ac787925399d6377615277))
+
+## [1.26.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.25.1...v1.26.0) (2026-09-30)
+
+
+### Features
+
+* **dashboard:** an Accuracy page that reads in order, a list by asse… ([#273](https://github.com/luiacuaniello/perspectivegraph/issues/273)) ([d52416f](https://github.com/luiacuaniello/perspectivegraph/commit/d52416fcd6f8f586d27c785761766a7a96d7baac))
+
+## [1.25.1](https://github.com/luiacuaniello/perspectivegraph/compare/v1.25.0...v1.25.1) (2026-09-27)
+
+
+### Bug Fixes
+
+* **dashboard:** the path detail passes WCAG 2.2 AA again, and the colours a read-only demo hides are checked too ([#266](https://github.com/luiacuaniello/perspectivegraph/issues/266)) ([657ebb0](https://github.com/luiacuaniello/perspectivegraph/commit/657ebb01547e0c5754ae124a3163eac893189cba))
+
+## [1.25.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.24.0...v1.25.0) (2026-09-26)
+
+
+### Features
+
+* a live attack is P1, a red-team verdict moves a route, and the path detail reads as a kill chain ([#263](https://github.com/luiacuaniello/perspectivegraph/issues/263)) ([336dc48](https://github.com/luiacuaniello/perspectivegraph/commit/336dc4868c3e71b21ab593ff8960610889c4335e))
+
+
+### Bug Fixes
+
+* the audit log says when a shutdown abandons its queue, and two timing tests stop failing on a busy runner ([#265](https://github.com/luiacuaniello/perspectivegraph/issues/265)) ([7e402fc](https://github.com/luiacuaniello/perspectivegraph/commit/7e402fc6f48304ba16ec451855512af6ce5da820))
+
+## [1.24.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.23.0...v1.24.0) (2026-09-26)
+
+
+### Features
+
+* the chart authenticates its bus, keeps its stream, and stops sharing one database password ([#261](https://github.com/luiacuaniello/perspectivegraph/issues/261)) ([176a22e](https://github.com/luiacuaniello/perspectivegraph/commit/176a22e4fbbc08bf66af4f07c902a0e13dc3dd03))
+
+## [1.23.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.22.0...v1.23.0) (2026-09-26)
+
+
+### Features
+
+* forget what a source stops reporting, and let the Helm ingress pass scanner reports ([#259](https://github.com/luiacuaniello/perspectivegraph/issues/259)) ([bd31abf](https://github.com/luiacuaniello/perspectivegraph/commit/bd31abfa78e051217399bd40f9612e0a391bad67))
+
+## [1.22.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.21.0...v1.22.0) (2026-09-26)
+
+
+### Features
+
+* the merge gate and the engine's PR feedback count the routes a change opens ([#257](https://github.com/luiacuaniello/perspectivegraph/issues/257)) ([c2bbec6](https://github.com/luiacuaniello/perspectivegraph/commit/c2bbec6d2d2745a1da59af3c3bb46280979f14b6))
+
+## [1.21.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.20.0...v1.21.0) (2026-09-25)
+
+
+### Features
+
+* prove fixes on common random numbers, and score exposure, seeds and attacker profiles consistently ([#255](https://github.com/luiacuaniello/perspectivegraph/issues/255)) ([a635260](https://github.com/luiacuaniello/perspectivegraph/commit/a635260f33455af633b0968053733fa9cd92bd6f))
+
 ## [1.20.0](https://github.com/luiacuaniello/perspectivegraph/compare/v1.19.0...v1.20.0) (2026-09-25)
 
 

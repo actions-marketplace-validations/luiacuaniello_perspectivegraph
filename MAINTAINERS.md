@@ -15,3 +15,23 @@ public issue - as described in [SECURITY.md](SECURITY.md).
 
 Interested in helping carry it? [GOVERNANCE.md](GOVERNANCE.md#becoming-a-maintainer) says
 what earns commit rights.
+
+## Contributors
+
+Thank you to everyone whose work is in this repository:
+
+- [@PandaHUN777](https://github.com/PandaHUN777) - the first contributions from outside:
+  tests for the calibration panel
+  ([#290](https://github.com/luiacuaniello/perspectivegraph/pull/290)) and for the ranked
+  attack-path list ([#293](https://github.com/luiacuaniello/perspectivegraph/pull/293)),
+  which also found that the runtime indicator was hidden from screen readers.
+- [@dipakshimpi](https://github.com/dipakshimpi) - the Helm chart's values schema
+  ([#310](https://github.com/luiacuaniello/perspectivegraph/pull/310)): a misspelt or unknown
+  setting now fails `helm install` instead of being silently ignored; and the fix for a Lambda
+  function anyone can invoke
+  ([#316](https://github.com/luiacuaniello/perspectivegraph/pull/316)), one for each way it
+  can be open: a function URL without authentication, or a function policy open to anyone.
+  And the documentation checks
+  ([#333](https://github.com/luiacuaniello/perspectivegraph/pull/333)): a Markdown file added
+  under `docs/` but left off the site now fails the build, and the relative links in the
+  Markdown the site does not publish, the chart's README among them, are checked too.

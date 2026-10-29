@@ -65,10 +65,7 @@
 					"  const secret = pm.variables.get('ingestHmacSecret');",
 					"  if (secret) {",
 					"    const body = (pm.request.body && pm.request.body.raw) ? pm.variables.replaceIn(pm.request.body.raw) : '';",
-					"    // v1: the body alone - kept so an engine older than v2 still accepts the request.",
-					"    const sig = 'sha256=' + CryptoJS.HmacSHA256(body, secret).toString(CryptoJS.enc.Hex);",
-					"    pm.request.headers.upsert({ key: 'X-PerspectiveGraph-Signature', value: sig });",
-					"    // v2: timestamp, method, path, canonical query and body hash, so a captured request",
+					"    // v2 alone: timestamp, method, path, canonical query and body hash, so a captured request",
 					"    // cannot be replayed or re-attributed to another commit. Same recipe as auth.SignV2.",
 					"    const full = pm.variables.replaceIn(url).replace(/^[a-z]+:\\/\\/[^/]+/i, '');",
 					"    const qi = full.indexOf('?');",
@@ -86,7 +83,7 @@
 					"    pm.request.headers.upsert({ key: 'X-PerspectiveGraph-Signature-V2', value: 'v2=' + CryptoJS.HmacSHA256(toSign, secret).toString(CryptoJS.enc.Hex) });",
 					"  }",
 					"}",
-					"if (url.includes('/graphql') || url.includes('/export/') || url.includes('/suppressions') || url.includes('/tickets') || url.includes('/validations') || url.includes('/ai/') || url.includes('/remediation/') || url.includes('/auth/me')) {",
+					"if (url.includes('/graphql') || url.includes('/export/') || url.includes('/suppressions') || url.includes('/tickets') || url.includes('/validations') || url.includes('/ai/') || url.includes('/remediation/') || url.includes('/auth/me') || url.includes('/gate/')) {",
 					"  const token = pm.variables.get('apiToken');",
 					"  if (token) {",
 					"    pm.request.headers.upsert({ key: 'Authorization', value: 'Bearer ' + token });",
@@ -242,7 +239,7 @@
 						},
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"_comment\": \"Simulates what the Cloud (Custodian) + Runtime (Falco) collectors contribute: the infra/identity subgraph. Ids for the image (Image:98b06dcdd2c1656f), CVE (CVE:6c58f4a6711be1a5), repository (Repository:818ecf749bd26593) and the Semgrep command-injection weakness (Weakness:681467edeb629421) match what the Trivy and Semgrep collectors generate from their sample reports. Posting all three correlates them into TWO attack paths to TWO crown jewels: (A) Trivy/Log4Shell -> admin IAM role, and (B) Semgrep/command-injection -> customers PII database.\",\n  \"source\": \"context\",\n  \"kind\": \"relationship\",\n  \"observed_at\": \"2026-06-08T12:00:00Z\",\n  \"nodes\": [\n    {\n      \"id\": \"LoadBalancer:edge-alb\",\n      \"label\": \"LoadBalancer\",\n      \"name\": \"edge-alb (0.0.0.0/0)\",\n      \"properties\": { \"internet_exposed\": true }\n    },\n    {\n      \"id\": \"Container:40c4770202821f32\",\n      \"label\": \"Container\",\n      \"name\": \"payments (ns: prod)\",\n      \"properties\": {}\n    },\n    {\n      \"id\": \"Image:98b06dcdd2c1656f\",\n      \"label\": \"Image\",\n      \"name\": \"payments-api:1.4.2\"\n    },\n    {\n      \"id\": \"CVE:6c58f4a6711be1a5\",\n      \"label\": \"CVE\",\n      \"name\": \"CVE-2021-44228\"\n    },\n    {\n      \"id\": \"Repository:818ecf749bd26593\",\n      \"label\": \"Repository\",\n      \"name\": \"payments-api\"\n    },\n    {\n      \"id\": \"Weakness:681467edeb629421\",\n      \"label\": \"Weakness\",\n      \"name\": \"command injection (src/payments/handler.py:42)\"\n    },\n    {\n      \"id\": \"IAM_Role:payments-admin\",\n      \"label\": \"IAM_Role\",\n      \"name\": \"payments-admin (AdministratorAccess)\",\n      \"properties\": { \"crown_jewel\": true }\n    },\n    {\n      \"id\": \"VirtualMachine:customers-db\",\n      \"label\": \"VirtualMachine\",\n      \"name\": \"customers-db (PII)\",\n      \"properties\": { \"crown_jewel\": true }\n    }\n  ],\n  \"edges\": [\n    {\n      \"type\": \"EXPOSES\",\n      \"from\": \"LoadBalancer:edge-alb\",\n      \"to\": \"Container:40c4770202821f32\",\n      \"exploit_probability\": 0.9\n    },\n    {\n      \"type\": \"HOSTS\",\n      \"from\": \"Container:40c4770202821f32\",\n      \"to\": \"Image:98b06dcdd2c1656f\",\n      \"exploit_probability\": 0.95\n    },\n    {\n      \"type\": \"BUILT_FROM\",\n      \"from\": \"Image:98b06dcdd2c1656f\",\n      \"to\": \"Repository:818ecf749bd26593\",\n      \"exploit_probability\": 0.9\n    },\n    {\n      \"type\": \"EXPLOITS\",\n      \"from\": \"CVE:6c58f4a6711be1a5\",\n      \"to\": \"IAM_Role:payments-admin\",\n      \"exploit_probability\": 0.8\n    },\n    {\n      \"type\": \"EXPLOITS\",\n      \"from\": \"Weakness:681467edeb629421\",\n      \"to\": \"VirtualMachine:customers-db\",\n      \"exploit_probability\": 0.7\n    }\n  ]\n}",
+							"raw": "{\n  \"_comment\": \"Simulates what the Cloud (Custodian) + Runtime (Falco) collectors contribute: the infra/identity subgraph. Ids for the image (Image:98b06dcdd2c1656f), CVE (CVE:6c58f4a6711be1a5), repository (Repository:818ecf749bd26593) and the Semgrep command-injection weakness (Weakness:681467edeb629421) match what the Trivy and Semgrep collectors generate from their sample reports. Posting all three correlates them into TWO attack paths to TWO crown jewels: (A) Trivy/Log4Shell -> admin IAM role, and (B) Semgrep/command-injection -> customers PII database.\",\n  \"source\": \"context\",\n  \"kind\": \"relationship\",\n  \"observed_at\": \"2026-06-08T12:00:00Z\",\n  \"nodes\": [\n    {\n      \"id\": \"LoadBalancer:edge-alb\",\n      \"label\": \"LoadBalancer\",\n      \"name\": \"edge-alb (0.0.0.0/0)\",\n      \"properties\": { \"internet_exposed\": true }\n    },\n    {\n      \"id\": \"Container:ba8322df0e416b02\",\n      \"label\": \"Container\",\n      \"name\": \"payments-7d9c8f\",\n      \"properties\": {}\n    },\n    {\n      \"id\": \"Image:98b06dcdd2c1656f\",\n      \"label\": \"Image\",\n      \"name\": \"payments-api:1.4.2\"\n    },\n    {\n      \"id\": \"CVE:6c58f4a6711be1a5\",\n      \"label\": \"CVE\",\n      \"name\": \"CVE-2021-44228\"\n    },\n    {\n      \"id\": \"Repository:818ecf749bd26593\",\n      \"label\": \"Repository\",\n      \"name\": \"payments-api\"\n    },\n    {\n      \"id\": \"Weakness:681467edeb629421\",\n      \"label\": \"Weakness\",\n      \"name\": \"command injection (src/payments/handler.py:42)\"\n    },\n    {\n      \"id\": \"IAM_Role:payments-admin\",\n      \"label\": \"IAM_Role\",\n      \"name\": \"payments-admin (AdministratorAccess)\",\n      \"properties\": { \"crown_jewel\": true }\n    },\n    {\n      \"id\": \"VirtualMachine:customers-db\",\n      \"label\": \"VirtualMachine\",\n      \"name\": \"customers-db (PII)\",\n      \"properties\": { \"crown_jewel\": true }\n    }\n  ],\n  \"edges\": [\n    {\n      \"type\": \"EXPOSES\",\n      \"from\": \"LoadBalancer:edge-alb\",\n      \"to\": \"Container:ba8322df0e416b02\",\n      \"exploit_probability\": 0.9\n    },\n    {\n      \"type\": \"HOSTS\",\n      \"from\": \"Container:ba8322df0e416b02\",\n      \"to\": \"Image:98b06dcdd2c1656f\",\n      \"exploit_probability\": 0.95\n    },\n    {\n      \"type\": \"BUILT_FROM\",\n      \"from\": \"Image:98b06dcdd2c1656f\",\n      \"to\": \"Repository:818ecf749bd26593\",\n      \"exploit_probability\": 0.9\n    },\n    {\n      \"type\": \"EXPLOITS\",\n      \"from\": \"CVE:6c58f4a6711be1a5\",\n      \"to\": \"IAM_Role:payments-admin\",\n      \"exploit_probability\": 0.8\n    },\n    {\n      \"type\": \"EXPLOITS\",\n      \"from\": \"Weakness:681467edeb629421\",\n      \"to\": \"VirtualMachine:customers-db\",\n      \"exploit_probability\": 0.7\n    }\n  ]\n}",
 							"options": {
 								"raw": {
 									"language": "json"
@@ -283,12 +280,18 @@
 								{
 									"key": "sha",
 									"value": "{{sha}}"
+								},
+								{
+									"key": "snapshot",
+									"value": "none",
+									"description": "Optional. A Trivy scan of an image by reference, outside a pull request, is a complete snapshot of the image: CVEs it no longer lists are removed once it lands (GRAPH_SWEEP). `none` declares this report partial - a scan filtered by --severity or --ignore-unfixed, sent beside an unfiltered feed of the same image. Ignored with slug/sha/pr: a pull request's scan never removes anything.",
+									"disabled": true
 								}
 							]
 						},
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"SchemaVersion\": 2,\n  \"ArtifactName\": \"payments-api:1.4.2\",\n  \"ArtifactType\": \"container_image\",\n  \"Results\": [\n    {\n      \"Target\": \"payments-api:1.4.2 (debian 11.6)\",\n      \"Class\": \"lang-pkgs\",\n      \"Type\": \"jar\",\n      \"Vulnerabilities\": [\n        {\n          \"VulnerabilityID\": \"CVE-2021-44228\",\n          \"PkgName\": \"log4j-core\",\n          \"InstalledVersion\": \"2.14.1\",\n          \"FixedVersion\": \"2.15.0\",\n          \"Severity\": \"CRITICAL\",\n          \"Title\": \"Log4Shell: remote code execution via JNDI lookup\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 10.0 }, \"redhat\": { \"V3Score\": 9.8 } }\n        },\n        {\n          \"VulnerabilityID\": \"CVE-2022-22965\",\n          \"PkgName\": \"spring-beans\",\n          \"InstalledVersion\": \"5.3.16\",\n          \"FixedVersion\": \"5.3.18\",\n          \"Severity\": \"HIGH\",\n          \"Title\": \"Spring4Shell: RCE via data binding\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 9.8 } }\n        }\n      ]\n    }\n  ]\n}",
+							"raw": "{\n  \"SchemaVersion\": 2,\n  \"ArtifactName\": \"payments-api:1.4.2\",\n  \"ArtifactType\": \"container_image\",\n  \"Results\": [\n    {\n      \"Target\": \"payments-api:1.4.2 (debian 11.6)\",\n      \"Class\": \"lang-pkgs\",\n      \"Type\": \"jar\",\n      \"Vulnerabilities\": [\n        {\n          \"VulnerabilityID\": \"CVE-2021-44228\",\n          \"PkgName\": \"org.apache.logging.log4j:log4j-core\",\n          \"InstalledVersion\": \"2.14.1\",\n          \"FixedVersion\": \"2.15.0\",\n          \"Severity\": \"CRITICAL\",\n          \"Title\": \"Log4Shell: remote code execution via JNDI lookup\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 10.0 }, \"redhat\": { \"V3Score\": 9.8 } }\n        },\n        {\n          \"VulnerabilityID\": \"CVE-2022-22965\",\n          \"PkgName\": \"org.springframework:spring-beans\",\n          \"InstalledVersion\": \"5.3.16\",\n          \"FixedVersion\": \"5.3.18\",\n          \"Severity\": \"HIGH\",\n          \"Title\": \"Spring4Shell: RCE via data binding\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 9.8 } }\n        }\n      ]\n    }\n  ]\n}",
 							"options": {
 								"raw": {
 									"language": "json"
@@ -402,14 +405,14 @@
 						},
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"provider\": \"aws\",\n  \"account_id\": \"123456789012\",\n  \"policies\": [\n    {\n      \"policy\": \"elb-internet-facing\",\n      \"resource\": \"aws.elbv2\",\n      \"resources\": [\n        { \"LoadBalancerName\": \"public-alb\", \"Scheme\": \"internet-facing\", \"Targets\": [\"i-0web1\"] }\n      ]\n    },\n    {\n      \"policy\": \"ec2-with-instance-profile\",\n      \"resource\": \"aws.ec2\",\n      \"resources\": [\n        {\n          \"InstanceId\": \"i-0web1\",\n          \"PublicIpAddress\": \"203.0.113.10\",\n          \"IamInstanceProfile\": { \"Arn\": \"arn:aws:iam::123456789012:instance-profile/web-admin\" },\n          \"Tags\": [{ \"Key\": \"Name\", \"Value\": \"web-frontend\" }]\n        }\n      ]\n    },\n    {\n      \"policy\": \"iam-admin-roles\",\n      \"resource\": \"aws.iam-role\",\n      \"resources\": [\n        {\n          \"RoleName\": \"web-admin\",\n          \"Arn\": \"arn:aws:iam::123456789012:role/web-admin\",\n          \"AdminAccess\": true,\n          \"CanAccess\": [{ \"type\": \"bucket\", \"name\": \"customer-exports\" }]\n        }\n      ]\n    },\n    {\n      \"policy\": \"s3-sensitive-data\",\n      \"resource\": \"aws.s3\",\n      \"resources\": [\n        { \"Name\": \"customer-exports\", \"Public\": false, \"Sensitive\": true }\n      ]\n    }\n  ]\n}",
+							"raw": "{\n  \"provider\": \"aws\",\n  \"account_id\": \"123456789012\",\n  \"policies\": [\n    {\n      \"policy\": \"elb-internet-facing\",\n      \"resource\": \"aws.app-elb\",\n      \"resources\": [\n        { \"LoadBalancerName\": \"public-alb\", \"Scheme\": \"internet-facing\", \"Targets\": [\"i-0web1\"] }\n      ]\n    },\n    {\n      \"policy\": \"ec2-with-instance-profile\",\n      \"resource\": \"aws.ec2\",\n      \"resources\": [\n        {\n          \"InstanceId\": \"i-0web1\",\n          \"PublicIpAddress\": \"203.0.113.10\",\n          \"IamInstanceProfile\": { \"Arn\": \"arn:aws:iam::123456789012:instance-profile/web-admin\" },\n          \"Tags\": [{ \"Key\": \"Name\", \"Value\": \"web-frontend\" }]\n        }\n      ]\n    },\n    {\n      \"policy\": \"iam-instance-profiles\",\n      \"resource\": \"aws.iam-profile\",\n      \"resources\": [\n        {\n          \"InstanceProfileName\": \"web-admin\",\n          \"Arn\": \"arn:aws:iam::123456789012:instance-profile/web-admin\",\n          \"Roles\": [{ \"RoleName\": \"web-admin\", \"Arn\": \"arn:aws:iam::123456789012:role/web-admin\" }]\n        }\n      ]\n    },\n    {\n      \"policy\": \"iam-admin-roles\",\n      \"resource\": \"aws.iam-role\",\n      \"resources\": [\n        {\n          \"RoleName\": \"web-admin\",\n          \"Arn\": \"arn:aws:iam::123456789012:role/web-admin\",\n          \"AdminAccess\": true,\n          \"CanAccess\": [{ \"type\": \"bucket\", \"name\": \"customer-exports\" }]\n        }\n      ]\n    },\n    {\n      \"policy\": \"s3-sensitive-data\",\n      \"resource\": \"aws.s3\",\n      \"resources\": [\n        { \"Name\": \"customer-exports\", \"Public\": false, \"Sensitive\": true }\n      ]\n    },\n    {\n      \"policy\": \"account-public-access-block\",\n      \"resource\": \"aws.account\",\n      \"resources\": [\n        {\n          \"account_id\": \"123456789012\",\n          \"c7n:s3-public-block\": { \"BlockPublicAcls\": true, \"IgnorePublicAcls\": true, \"BlockPublicPolicy\": true, \"RestrictPublicBuckets\": true }\n        }\n      ]\n    }\n  ]\n}",
 							"options": {
 								"raw": {
 									"language": "json"
 								}
 							}
 						},
-						"description": "Cloud inventory/identity export: ALB, EC2, IAM role, S3 - adds the cloud attack surface."
+						"description": "Cloud inventory/identity export: ALB, EC2, the instance profile that names the EC2 role (aws.iam-profile), IAM role, S3 - adds the cloud attack surface. Without the profile, the instance-to-role join is guessed from the profile name and marked as inferred. The account's S3 Block Public Access (aws.account, Custodian's s3-public-block filter) applies to every bucket in it, the stricter of the bucket's and the account's settings winning."
 					}
 				},
 				{
@@ -434,7 +437,7 @@
 						},
 						"body": {
 							"mode": "raw",
-							"raw": "[\n  {\n    \"rule\": \"Terminal shell in container\",\n    \"priority\": \"Critical\",\n    \"time\": \"2026-06-08T12:05:00Z\",\n    \"output\": \"A shell was spawned in a container (user=root container=payments image=payments-api:1.4.2 proc=bash)\",\n    \"output_fields\": {\n      \"container.id\": \"a1b2c3d4e5f6\",\n      \"container.name\": \"payments\",\n      \"container.image.repository\": \"payments-api\",\n      \"container.image.tag\": \"1.4.2\",\n      \"k8s.pod.name\": \"payments-7d9c8f\",\n      \"k8s.ns.name\": \"prod\",\n      \"proc.cmdline\": \"bash -i\"\n    },\n    \"source\": \"syscall\",\n    \"tags\": [\"container\", \"shell\", \"mitre_execution\"]\n  },\n  {\n    \"rule\": \"Unexpected outbound connection\",\n    \"priority\": \"Warning\",\n    \"time\": \"2026-06-08T12:05:02Z\",\n    \"output\": \"Outbound connection to suspicious endpoint (container=payments dest=198.51.100.7:443)\",\n    \"output_fields\": {\n      \"container.name\": \"payments\",\n      \"fd.name\": \"198.51.100.7:443\"\n    },\n    \"source\": \"syscall\",\n    \"tags\": [\"network\", \"mitre_exfiltration\"]\n  }\n]",
+							"raw": "[\n  {\n    \"rule\": \"Terminal shell in container\",\n    \"priority\": \"Critical\",\n    \"time\": \"2026-06-08T12:05:00Z\",\n    \"output\": \"A shell was spawned in a container (user=root container=payments image=payments-api:1.4.2 proc=bash)\",\n    \"output_fields\": {\n      \"container.id\": \"a1b2c3d4e5f6\",\n      \"container.name\": \"payments\",\n      \"container.image.repository\": \"payments-api\",\n      \"container.image.tag\": \"1.4.2\",\n      \"k8s.pod.name\": \"payments-7d9c8f\",\n      \"k8s.ns.name\": \"prod\",\n      \"proc.cmdline\": \"bash -i\"\n    },\n    \"source\": \"syscall\",\n    \"tags\": [\"container\", \"shell\", \"mitre_execution\"]\n  },\n  {\n    \"rule\": \"Unexpected outbound connection\",\n    \"priority\": \"Warning\",\n    \"time\": \"2026-06-08T12:05:02Z\",\n    \"output\": \"Outbound connection to suspicious endpoint (container=payments dest=198.51.100.7:443)\",\n    \"output_fields\": {\n      \"container.name\": \"payments\",\n      \"k8s.pod.name\": \"payments-7d9c8f\",\n      \"k8s.ns.name\": \"prod\",\n      \"fd.name\": \"198.51.100.7:443\"\n    },\n    \"source\": \"syscall\",\n    \"tags\": [\"network\", \"mitre_exfiltration\"]\n  }\n]",
 							"options": {
 								"raw": {
 									"language": "json"
@@ -505,6 +508,18 @@
 									"key": "sha",
 									"value": "{{sha}}",
 									"description": "Optional, with slug. The commit the manifests were rendered from."
+								},
+								{
+									"key": "snapshot",
+									"value": "cluster:prod",
+									"description": "Optional, and never with slug/sha. Declares this dump the COMPLETE state of the named scope: once it lands, whatever an earlier complete dump of the same scope listed and this one does not - a deleted pod, a removed binding - leaves the graph (GRAPH_SWEEP). Name only what you really sent in full; a partial dump under a cluster-wide scope removes everything it left out.",
+									"disabled": true
+								},
+								{
+									"key": "cluster",
+									"value": "prod-eu",
+									"description": "Optional. The cluster this dump describes, for an estate of more than one: every object is keyed with it, so two clusters' prod/web-sa stay two service accounts and a route cannot cross from one cluster into another's cluster-admin. Give the merge gate the same name (-cluster / the Action's cluster input). Leave it off for one cluster: the ids stay as they were.",
+									"disabled": true
 								}
 							]
 						},
@@ -590,7 +605,7 @@
 						},
 						"body": {
 							"mode": "raw",
-							"raw": "{\n  \"_comment\": \"Real `aws iam get-account-authorization-details` shape. PerspectiveGraph flattens each principal's effective permissions and matches privesc primitives: public-deployer is publicly assumable (trust Principal:*) AND has iam:PassRole+lambda:CreateFunction, so internet \\u2192 public-deployer --CAN_ESCALATE_TO--> account-admin (crown jewel). ci-bot can iam:AttachUserPolicy (escalates) and is trusted to assume admin-role. app-readonly is benign and must NOT be flagged \\u2014 a precision check.\",\n  \"UserDetailList\": [\n    {\n      \"UserName\": \"ci-bot\",\n      \"Arn\": \"arn:aws:iam::123456789012:user/ci-bot\",\n      \"GroupList\": [],\n      \"AttachedManagedPolicies\": [],\n      \"UserPolicyList\": [\n        {\n          \"PolicyName\": \"self-service\",\n          \"PolicyDocument\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"iam:AttachUserPolicy\",\n                \"Resource\": \"*\"\n              },\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"s3:GetObject\",\n                  \"s3:PutObject\"\n                ],\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ],\n  \"GroupDetailList\": [],\n  \"RoleDetailList\": [\n    {\n      \"RoleName\": \"public-deployer\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/public-deployer\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": \"*\",\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [\n        {\n          \"PolicyName\": \"DeployAccess\",\n          \"PolicyArn\": \"arn:aws:iam::123456789012:policy/DeployAccess\"\n        }\n      ],\n      \"RolePolicyList\": [],\n      \"Tags\": []\n    },\n    {\n      \"RoleName\": \"admin-role\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/admin-role\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\n              \"AWS\": \"arn:aws:iam::123456789012:user/ci-bot\"\n            },\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [\n        {\n          \"PolicyName\": \"AdministratorAccess\",\n          \"PolicyArn\": \"arn:aws:iam::aws:policy/AdministratorAccess\"\n        }\n      ],\n      \"RolePolicyList\": [],\n      \"Tags\": []\n    },\n    {\n      \"RoleName\": \"app-readonly\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/app-readonly\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\n              \"Service\": \"ec2.amazonaws.com\"\n            },\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [],\n      \"RolePolicyList\": [\n        {\n          \"PolicyName\": \"read-only\",\n          \"PolicyDocument\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"s3:GetObject\",\n                  \"dynamodb:GetItem\"\n                ],\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ],\n      \"Tags\": []\n    }\n  ],\n  \"Policies\": [\n    {\n      \"PolicyName\": \"AdministratorAccess\",\n      \"Arn\": \"arn:aws:iam::aws:policy/AdministratorAccess\",\n      \"DefaultVersionId\": \"v1\",\n      \"PolicyVersionList\": [\n        {\n          \"VersionId\": \"v1\",\n          \"IsDefaultVersion\": true,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"*\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    },\n    {\n      \"PolicyName\": \"DeployAccess\",\n      \"Arn\": \"arn:aws:iam::123456789012:policy/DeployAccess\",\n      \"DefaultVersionId\": \"v3\",\n      \"PolicyVersionList\": [\n        {\n          \"VersionId\": \"v1\",\n          \"IsDefaultVersion\": false,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"s3:GetObject\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        },\n        {\n          \"VersionId\": \"v3\",\n          \"IsDefaultVersion\": true,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"iam:PassRole\",\n                  \"lambda:CreateFunction\",\n                  \"lambda:UpdateFunctionCode\"\n                ],\n                \"Resource\": \"*\"\n              },\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"s3:GetObject\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ]\n}"
+							"raw": "{\n  \"_comment\": \"Real `aws iam get-account-authorization-details` shape. PerspectiveGraph flattens each principal's effective permissions and matches privesc primitives: public-deployer is publicly assumable (trust Principal:*) AND has iam:PassRole+lambda:CreateFunction, so internet \\u2192 public-deployer --CAN_ESCALATE_TO--> account-admin (crown jewel). ci-bot can iam:AttachUserPolicy (escalates) and is trusted to assume admin-role. app-readonly is benign and must NOT be flagged \\u2014 a precision check.\",\n  \"UserDetailList\": [\n    {\n      \"UserName\": \"ci-bot\",\n      \"Arn\": \"arn:aws:iam::123456789012:user/ci-bot\",\n      \"GroupList\": [],\n      \"AttachedManagedPolicies\": [],\n      \"UserPolicyList\": [\n        {\n          \"PolicyName\": \"self-service\",\n          \"PolicyDocument\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"iam:AttachUserPolicy\",\n                \"Resource\": \"*\"\n              },\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"s3:GetObject\",\n                  \"s3:PutObject\"\n                ],\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ],\n  \"GroupDetailList\": [],\n  \"RoleDetailList\": [\n    {\n      \"RoleName\": \"public-deployer\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/public-deployer\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": \"*\",\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [\n        {\n          \"PolicyName\": \"DeployAccess\",\n          \"PolicyArn\": \"arn:aws:iam::123456789012:policy/DeployAccess\"\n        }\n      ],\n      \"RolePolicyList\": [],\n      \"Tags\": []\n    },\n    {\n      \"RoleName\": \"admin-role\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/admin-role\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\n              \"AWS\": \"arn:aws:iam::123456789012:user/ci-bot\"\n            },\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [\n        {\n          \"PolicyName\": \"AdministratorAccess\",\n          \"PolicyArn\": \"arn:aws:iam::aws:policy/AdministratorAccess\"\n        }\n      ],\n      \"RolePolicyList\": [],\n      \"Tags\": []\n    },\n    {\n      \"RoleName\": \"app-readonly\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/app-readonly\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": {\n              \"Service\": \"ec2.amazonaws.com\"\n            },\n            \"Action\": \"sts:AssumeRole\"\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [],\n      \"RolePolicyList\": [\n        {\n          \"PolicyName\": \"read-only\",\n          \"PolicyDocument\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"s3:GetObject\",\n                  \"dynamodb:GetItem\"\n                ],\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ],\n      \"Tags\": []\n    },\n    {\n      \"RoleName\": \"github-deploy\",\n      \"Arn\": \"arn:aws:iam::123456789012:role/github-deploy\",\n      \"AssumeRolePolicyDocument\": {\n        \"Version\": \"2012-10-17\",\n        \"Statement\": [\n          {\n            \"Effect\": \"Allow\",\n            \"Principal\": { \"Federated\": \"arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com\" },\n            \"Action\": \"sts:AssumeRoleWithWebIdentity\",\n            \"Condition\": { \"StringEquals\": { \"token.actions.githubusercontent.com:aud\": \"sts.amazonaws.com\" } }\n          }\n        ]\n      },\n      \"AttachedManagedPolicies\": [],\n      \"RolePolicyList\": [\n        {\n          \"PolicyName\": \"deploy-functions\",\n          \"PolicyDocument\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              { \"Effect\": \"Allow\", \"Action\": [\"iam:PassRole\", \"lambda:CreateFunction\", \"lambda:UpdateFunctionCode\"], \"Resource\": \"*\" }\n            ]\n          }\n        }\n      ],\n      \"Tags\": []\n    }\n  ],\n  \"Policies\": [\n    {\n      \"PolicyName\": \"AdministratorAccess\",\n      \"Arn\": \"arn:aws:iam::aws:policy/AdministratorAccess\",\n      \"DefaultVersionId\": \"v1\",\n      \"PolicyVersionList\": [\n        {\n          \"VersionId\": \"v1\",\n          \"IsDefaultVersion\": true,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"*\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    },\n    {\n      \"PolicyName\": \"DeployAccess\",\n      \"Arn\": \"arn:aws:iam::123456789012:policy/DeployAccess\",\n      \"DefaultVersionId\": \"v3\",\n      \"PolicyVersionList\": [\n        {\n          \"VersionId\": \"v1\",\n          \"IsDefaultVersion\": false,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"s3:GetObject\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        },\n        {\n          \"VersionId\": \"v3\",\n          \"IsDefaultVersion\": true,\n          \"Document\": {\n            \"Version\": \"2012-10-17\",\n            \"Statement\": [\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": [\n                  \"iam:PassRole\",\n                  \"lambda:CreateFunction\",\n                  \"lambda:UpdateFunctionCode\"\n                ],\n                \"Resource\": \"*\"\n              },\n              {\n                \"Effect\": \"Allow\",\n                \"Action\": \"s3:GetObject\",\n                \"Resource\": \"*\"\n              }\n            ]\n          }\n        }\n      ]\n    }\n  ]\n}"
 						},
 						"description": "Posts the account's IAM reality. Emits CAN_ESCALATE_TO edges to a synthetic account-admin crown jewel; roles trusting Principal:* are marked internet_exposed. Read-only: needs only iam:GetAccountAuthorizationDetails."
 					},
@@ -692,6 +707,140 @@
 						"description": "A real classifier finding marks the asset a crown jewel (basis classified:<source>:<kind>). label defaults to Bucket; use Database for an RDS/SQL store."
 					},
 					"response": []
+				},
+				{
+					"name": "13. EKS access (Pod Identity, access entries)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"_comment\": \"Per EKS cluster, what the cluster's own objects do not show: which IAM role each service account's pods get (Pod Identity) and which IAM principals get into the cluster, with which access policy. The AWS connector assembles this from the EKS API; by hand, from aws eks describe-pod-identity-association and aws eks list-associated-access-policies. The cluster name must be the ?cluster= its Kubernetes dump is sent with, or the two will not meet. ci-deployer holds AmazonEKSClusterAdminPolicy: it reaches cluster-admin outright. developers holds AmazonEKSEditPolicy, which reads secrets: a way to cluster-admin.\",\n  \"clusters\": [\n    {\n      \"name\": \"prod-eu\",\n      \"podIdentityAssociations\": [\n        {\n          \"namespace\": \"prod\",\n          \"serviceAccount\": \"payments-sa\",\n          \"roleArn\": \"arn:aws:iam::123456789012:role/payments-pod-role\"\n        }\n      ],\n      \"accessEntries\": [\n        {\n          \"principalArn\": \"arn:aws:iam::123456789012:role/ci-deployer\",\n          \"accessPolicies\": [\n            {\n              \"policyArn\": \"arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy\",\n              \"accessScope\": {\n                \"type\": \"cluster\"\n              }\n            }\n          ]\n        },\n        {\n          \"principalArn\": \"arn:aws:iam::123456789012:role/developers\",\n          \"accessPolicies\": [\n            {\n              \"policyArn\": \"arn:aws:eks::aws:cluster-access-policy/AmazonEKSEditPolicy\",\n              \"accessScope\": {\n                \"type\": \"namespace\"\n              }\n            }\n          ]\n        }\n      ]\n    }\n  ]\n}\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{ingestUrl}}/ingest/eks",
+							"host": [
+								"{{ingestUrl}}"
+							],
+							"path": [
+								"ingest",
+								"eks"
+							]
+						},
+						"description": "Identity-federation from an external IdP (Okta/Entra/…): IdentityProvider(internet) --AUTHENTICATES--> User --ASSUMES--> IAM_Role. Federated role ARNs converge with the IAM collector, so a no-MFA user federating into an admin/escalation role lights up the modern path internet → SSO → user → cloud admin. Assemble from the Okta/Entra admin API."
+					}
+				},
+				{
+					"name": "14. Lambda functions (serverless entry points)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"_comment\": \"Per Lambda function, what list-functions, get-function-url-config, get-policy and list-tags return, as the AWS connector assembles it. orders-webhook has a function URL without authentication AND the two grants Lambda asks of a URL created since October 2025 - lambda:InvokeFunctionUrl and lambda:InvokeFunction - for every principal: an entry point, and its execution role is one step on. nightly-report has no URL and an empty policy: invocable only by principals it names. The function's role is keyed by ARN, so a route continues into the role's escalations.\",\n  \"functions\": [\n    {\n      \"FunctionName\": \"orders-webhook\",\n      \"FunctionArn\": \"arn:aws:lambda:eu-west-1:123456789012:function:orders-webhook\",\n      \"Role\": \"arn:aws:iam::123456789012:role/orders-webhook-exec\",\n      \"Url\": {\n        \"AuthType\": \"NONE\",\n        \"FunctionUrl\": \"https://abc123.lambda-url.eu-west-1.on.aws/\",\n        \"CreationTime\": \"2026-03-12T09:41:27.512+0000\"\n      },\n      \"Policy\": \"{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[{\\\"Effect\\\":\\\"Allow\\\",\\\"Principal\\\":\\\"*\\\",\\\"Action\\\":\\\"lambda:InvokeFunctionUrl\\\",\\\"Resource\\\":\\\"arn:aws:lambda:eu-west-1:123456789012:function:orders-webhook\\\",\\\"Condition\\\":{\\\"StringEquals\\\":{\\\"lambda:FunctionUrlAuthType\\\":\\\"NONE\\\"}}},{\\\"Effect\\\":\\\"Allow\\\",\\\"Principal\\\":\\\"*\\\",\\\"Action\\\":\\\"lambda:InvokeFunction\\\",\\\"Resource\\\":\\\"arn:aws:lambda:eu-west-1:123456789012:function:orders-webhook\\\",\\\"Condition\\\":{\\\"Bool\\\":{\\\"lambda:InvokedViaFunctionUrl\\\":\\\"true\\\"}}}]}\",\n      \"Tags\": {\n        \"app\": \"orders\"\n      }\n    },\n    {\n      \"FunctionName\": \"nightly-report\",\n      \"FunctionArn\": \"arn:aws:lambda:eu-west-1:123456789012:function:nightly-report\",\n      \"Role\": \"arn:aws:iam::123456789012:role/reporting-exec\",\n      \"Policy\": \"{\\\"Statement\\\":[]}\"\n    }\n  ]\n}\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{ingestUrl}}/ingest/lambda",
+							"host": [
+								"{{ingestUrl}}"
+							],
+							"path": [
+								"ingest",
+								"lambda"
+							]
+						},
+						"description": "Identity-federation from an external IdP (Okta/Entra/…): IdentityProvider(internet) --AUTHENTICATES--> User --ASSUMES--> IAM_Role. Federated role ARNs converge with the IAM collector, so a no-MFA user federating into an admin/escalation role lights up the modern path internet → SSO → user → cloud admin. Assemble from the Okta/Entra admin API."
+					}
+				},
+				{
+					"name": "15. Load balancer in front of a private instance",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"_comment\": \"The commonest AWS shape: an internet-facing application load balancer in a public subnet, the instance behind it in a private one. The instance is not exposed itself (no public address, its subnet routes through NAT); the load balancer is, on tcp/443 - the port its listener serves and its group admits - and it ROUTES_TO the instance named in its target group. The route internet → web → app → app-role appears; before 1.30.0 nothing led to the instance. The AWS connector assembles this from describe-load-balancers, describe-listeners, describe-target-groups and describe-target-health.\",\n  \"security_groups\": [\n    {\n      \"GroupId\": \"sg-alb\",\n      \"IpPermissions\": [\n        {\n          \"IpProtocol\": \"tcp\",\n          \"FromPort\": 443,\n          \"ToPort\": 443,\n          \"IpRanges\": [\n            {\n              \"CidrIp\": \"0.0.0.0/0\"\n            }\n          ]\n        }\n      ]\n    },\n    {\n      \"GroupId\": \"sg-app\",\n      \"IpPermissions\": [\n        {\n          \"IpProtocol\": \"tcp\",\n          \"FromPort\": 8080,\n          \"ToPort\": 8080,\n          \"UserIdGroupPairs\": [\n            {\n              \"GroupId\": \"sg-alb\"\n            }\n          ]\n        }\n      ]\n    }\n  ],\n  \"instances\": [\n    {\n      \"InstanceId\": \"i-app\",\n      \"SubnetId\": \"subnet-priv\",\n      \"PrivateIpAddress\": \"10.0.2.10\",\n      \"SecurityGroups\": [\n        {\n          \"GroupId\": \"sg-app\"\n        }\n      ],\n      \"Tags\": [\n        {\n          \"Key\": \"Name\",\n          \"Value\": \"app\"\n        }\n      ],\n      \"IamInstanceProfile\": {\n        \"Arn\": \"arn:aws:iam::123456789012:instance-profile/app\"\n      },\n      \"MetadataOptions\": {\n        \"HttpTokens\": \"required\"\n      }\n    }\n  ],\n  \"instance_profiles\": [\n    {\n      \"Arn\": \"arn:aws:iam::123456789012:instance-profile/app\",\n      \"Roles\": [\n        {\n          \"Arn\": \"arn:aws:iam::123456789012:role/app-role\",\n          \"RoleName\": \"app-role\"\n        }\n      ]\n    }\n  ],\n  \"load_balancers\": [\n    {\n      \"LoadBalancerArn\": \"arn:aws:elasticloadbalancing:eu-west-1:123456789012:loadbalancer/app/web/50dc6c495c0c9188\",\n      \"LoadBalancerName\": \"web\",\n      \"Type\": \"application\",\n      \"Scheme\": \"internet-facing\",\n      \"IpAddressType\": \"ipv4\",\n      \"SecurityGroups\": [\n        \"sg-alb\"\n      ],\n      \"AvailabilityZones\": [\n        {\n          \"SubnetId\": \"subnet-pub-a\"\n        },\n        {\n          \"SubnetId\": \"subnet-pub-b\"\n        }\n      ],\n      \"Listeners\": [\n        {\n          \"Protocol\": \"HTTPS\",\n          \"Port\": 443\n        }\n      ],\n      \"TargetGroups\": [\n        {\n          \"TargetGroupArn\": \"arn:aws:elasticloadbalancing:eu-west-1:123456789012:targetgroup/app/73e2d6bc24d8a067\",\n          \"TargetType\": \"instance\",\n          \"Protocol\": \"HTTP\",\n          \"Port\": 8080,\n          \"Targets\": [\n            {\n              \"Id\": \"i-app\"\n            }\n          ]\n        }\n      ]\n    }\n  ],\n  \"subnets\": [\n    {\n      \"SubnetId\": \"subnet-pub-a\",\n      \"RouteTableId\": \"rt-pub\"\n    },\n    {\n      \"SubnetId\": \"subnet-pub-b\",\n      \"RouteTableId\": \"rt-pub\"\n    },\n    {\n      \"SubnetId\": \"subnet-priv\",\n      \"RouteTableId\": \"rt-priv\"\n    }\n  ],\n  \"route_tables\": [\n    {\n      \"RouteTableId\": \"rt-pub\",\n      \"Routes\": [\n        {\n          \"DestinationCidrBlock\": \"0.0.0.0/0\",\n          \"GatewayId\": \"igw-1\"\n        }\n      ]\n    },\n    {\n      \"RouteTableId\": \"rt-priv\",\n      \"Routes\": [\n        {\n          \"DestinationCidrBlock\": \"0.0.0.0/0\",\n          \"NatGatewayId\": \"nat-1\"\n        }\n      ]\n    }\n  ]\n}\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{ingestUrl}}/ingest/cloudnet?account=123456789012",
+							"host": [
+								"{{ingestUrl}}"
+							],
+							"path": [
+								"ingest",
+								"cloudnet"
+							],
+							"query": [
+								{
+									"key": "account",
+									"value": "123456789012"
+								}
+							]
+						},
+						"description": "Identity-federation from an external IdP (Okta/Entra/…): IdentityProvider(internet) --AUTHENTICATES--> User --ASSUMES--> IAM_Role. Federated role ARNs converge with the IAM collector, so a no-MFA user federating into an admin/escalation role lights up the modern path internet → SSO → user → cloud admin. Assemble from the Okta/Entra admin API."
+					}
+				},
+				{
+					"name": "16. API Gateway (routes that answer without credentials)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"_comment\": \"Per API, what API Gateway returns, as the AWS connector assembles it. The orders REST API answers GET /orders without credentials, so it is an entry point and leads to orders-webhook; POST /orders sits behind a Cognito authorizer and leads nowhere. back-office is PRIVATE: reachable only through a VPC endpoint, no entry point. The shop HTTP API answers GET /items without credentials (to items) and wants a JWT for POST /items. Functions are keyed by ARN, as the lambda collector keys them, so the route continues into each function's role.\",\n  \"account\": \"123456789012\",\n  \"region\": \"eu-west-1\",\n  \"rest_apis\": [\n    {\n      \"id\": \"a1b2c3d4e5\",\n      \"name\": \"orders\",\n      \"endpointTypes\": [\n        \"REGIONAL\"\n      ],\n      \"stages\": [\n        \"prod\"\n      ],\n      \"methods\": [\n        {\n          \"path\": \"/orders\",\n          \"httpMethod\": \"GET\",\n          \"authorizationType\": \"NONE\",\n          \"apiKeyRequired\": false,\n          \"integrationType\": \"AWS_PROXY\",\n          \"integrationUri\": \"arn:aws:apigateway:eu-west-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-west-1:123456789012:function:orders-webhook/invocations\"\n        },\n        {\n          \"path\": \"/orders\",\n          \"httpMethod\": \"POST\",\n          \"authorizationType\": \"COGNITO_USER_POOLS\",\n          \"apiKeyRequired\": false,\n          \"integrationType\": \"AWS_PROXY\",\n          \"integrationUri\": \"arn:aws:apigateway:eu-west-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-west-1:123456789012:function:orders-write/invocations\"\n        }\n      ]\n    },\n    {\n      \"id\": \"f6g7h8i9j0\",\n      \"name\": \"back-office\",\n      \"endpointTypes\": [\n        \"PRIVATE\"\n      ],\n      \"stages\": [\n        \"prod\"\n      ],\n      \"methods\": [\n        {\n          \"path\": \"/\",\n          \"httpMethod\": \"GET\",\n          \"authorizationType\": \"NONE\",\n          \"apiKeyRequired\": false,\n          \"integrationType\": \"AWS_PROXY\",\n          \"integrationUri\": \"arn:aws:apigateway:eu-west-1:lambda:path/2015-03-31/functions/arn:aws:lambda:eu-west-1:123456789012:function:back-office/invocations\"\n        }\n      ]\n    }\n  ],\n  \"http_apis\": [\n    {\n      \"apiId\": \"k1l2m3n4o5\",\n      \"name\": \"shop\",\n      \"protocolType\": \"HTTP\",\n      \"stages\": [\n        \"$default\"\n      ],\n      \"routes\": [\n        {\n          \"routeKey\": \"GET /items\",\n          \"authorizationType\": \"NONE\",\n          \"target\": \"integrations/abc123\"\n        },\n        {\n          \"routeKey\": \"POST /items\",\n          \"authorizationType\": \"JWT\",\n          \"target\": \"integrations/def456\"\n        }\n      ],\n      \"integrations\": [\n        {\n          \"integrationId\": \"abc123\",\n          \"integrationType\": \"AWS_PROXY\",\n          \"integrationUri\": \"arn:aws:lambda:eu-west-1:123456789012:function:items\"\n        },\n        {\n          \"integrationId\": \"def456\",\n          \"integrationType\": \"AWS_PROXY\",\n          \"integrationUri\": \"arn:aws:lambda:eu-west-1:123456789012:function:items-write\"\n        }\n      ]\n    }\n  ]\n}\n",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{ingestUrl}}/ingest/apigateway",
+							"host": [
+								"{{ingestUrl}}"
+							],
+							"path": [
+								"ingest",
+								"apigateway"
+							]
+						},
+						"description": "Identity-federation from an external IdP (Okta/Entra/…): IdentityProvider(internet) --AUTHENTICATES--> User --ASSUMES--> IAM_Role. Federated role ARNs converge with the IAM collector, so a no-MFA user federating into an admin/escalation role lights up the modern path internet → SSO → user → cloud admin. Assemble from the Okta/Entra admin API."
+					}
 				}
 			]
 		},
@@ -720,7 +869,7 @@
 						"body": {
 							"mode": "graphql",
 							"graphql": {
-								"query": "query Dashboard {\n  posture { criticalPaths runtimeConfirmed policyViolations nodes edges }\n  attackPaths {\n    id\n    score\n    runtimeConfirmed\n    nodes { id label name internetExposed crownJewel crownJewelBasis classification secretsScrubbed runtimeAlert severity cvss }\n    steps { edgeType from to probability attack { id name tactic } }\n    remediations { title kind filename rationale content }\n  }\n  invariantViolations { invariantId description severity nodes { id label name } }\n  graph {\n    nodes { id label name internetExposed crownJewel runtimeAlert }\n    edges { type from to probability attack { id tactic } }\n  }\n}",
+								"query": "query Dashboard {\n  posture { criticalPaths runtimeConfirmed policyViolations nodes edges }\n  attackPaths {\n    id\n    score\n    runtimeConfirmed\n    directAccess\n    nodes { id label name internetExposed crownJewel crownJewelBasis classification secretsScrubbed runtimeAlert severity cvss }\n    priority\n    priorityLabel\n    priorityReason\n    steps { edgeType from to probability attack { id name tactic } }\n    remediations { title kind filename rationale content cut { from to type } }\n  }\n  invariantViolations { invariantId description severity nodes { id label name } }\n  graph {\n    nodes { id label name internetExposed crownJewel runtimeAlert }\n    edges { type from to probability attack { id tactic } }\n  }\n}",
 								"variables": ""
 							}
 						},
@@ -784,6 +933,113 @@
 							}
 						},
 						"description": "What the engine says about ONE commit, for a CI merge gate. This is the query behind `perspectivegraph gate` and the GitHub Action.\n\nIt reports THREE states, not two, and the third is why it exists:\n\n- `analysed: true`, `criticalPaths: 0` - clean. The engine looked and found nothing.\n- `analysed: true`, `criticalPaths: N` - blocked. N critical paths run through this commit, listed in `paths`.\n- `analysed: false` - UNKNOWN. Nothing carrying this commit ever reached the graph. This is NOT clean: a pipeline whose scanner output never arrived would otherwise get the same green light as one that is genuinely safe, which is the silent false negative this product exists to make visible.\n\n`analysedAt` dates the pass that produced `criticalPaths`. A gate must ignore a verdict older than its own ingest - the commit can already be in the graph while the paths still describe the estate as it was before it arrived, and that reads as zero paths.\n\nThe commit gets into the graph via the `slug` and `sha` query parameters on the ingest webhooks (see 'Ingest - scanner webhooks'). Without them nothing is stamped and every verdict here is UNKNOWN."
+					},
+					"response": []
+				},
+				{
+					"name": "Merge gate - what this change adds (POST /gate/impact)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"SchemaVersion\": 2,\n  \"ArtifactName\": \"payments-api:1.4.2\",\n  \"ArtifactType\": \"container_image\",\n  \"Results\": [\n    {\n      \"Target\": \"payments-api:1.4.2 (debian 11.6)\",\n      \"Class\": \"lang-pkgs\",\n      \"Type\": \"jar\",\n      \"Vulnerabilities\": [\n        {\n          \"VulnerabilityID\": \"CVE-2021-44228\",\n          \"PkgName\": \"org.apache.logging.log4j:log4j-core\",\n          \"InstalledVersion\": \"2.14.1\",\n          \"FixedVersion\": \"2.15.0\",\n          \"Severity\": \"CRITICAL\",\n          \"Title\": \"Log4Shell: remote code execution via JNDI lookup\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 10.0 }, \"redhat\": { \"V3Score\": 9.8 } }\n        },\n        {\n          \"VulnerabilityID\": \"CVE-2022-22965\",\n          \"PkgName\": \"org.springframework:spring-beans\",\n          \"InstalledVersion\": \"5.3.16\",\n          \"FixedVersion\": \"5.3.18\",\n          \"Severity\": \"HIGH\",\n          \"Title\": \"Spring4Shell: RCE via data binding\",\n          \"CVSS\": { \"nvd\": { \"V3Score\": 9.8 } }\n        }\n      ]\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{apiUrl}}/gate/impact?source=trivy&slug={{slug}}&sha={{sha}}&pr={{pr}}",
+							"host": [
+								"{{apiUrl}}"
+							],
+							"path": [
+								"gate",
+								"impact"
+							],
+							"query": [
+								{
+									"key": "source",
+									"value": "trivy"
+								},
+								{
+									"key": "slug",
+									"value": "{{slug}}"
+								},
+								{
+									"key": "sha",
+									"value": "{{sha}}"
+								},
+								{
+									"key": "pr",
+									"value": "{{pr}}"
+								}
+							]
+						},
+						"description": "The merge gate's default question since 1.22: what does THIS change add to the estate's attack paths? This is the call behind `perspectivegraph gate` and the GitHub Action.\n\nThe body is the scanner report, the query the same parameters the ingest webhook takes. The engine parses it with the same collector, applies it through the same normalizer to an in-memory COPY of the graph, and compares the critical paths: a route between an entry and a sensitive asset that did not exist before is `introduced`, one that became likelier is `worsened` (with `previousScore`). Those are `paths` and `criticalPaths`. Routes that were there before and merely run through what the change touches are counted in `preexisting` and do not block. NOTHING is written - send the report to the ingest webhook as well if the live graph should record it.\n\n`analysed: false` is UNKNOWN, as with prVerdict: nothing in the report carried this commit. `reachable: false` means none of the change's assets can be reached from an attack seed - fine for a service not deployed, otherwise usually a scan naming the image differently from the workload. `recorded: true` means the engine already held this commit, so routes through it count per commit (`change: recorded`).\n\nNeeds the bearer token (set apiToken); refused to anonymous callers on a public instance. Run the Trivy ingest request first to see a rescan of the same image come back clean with `preexisting` > 0."
+					},
+					"response": []
+				},
+				{
+					"name": "Merge gate - a Terraform plan (POST /gate/impact?source=terraform)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"format_version\": \"1.2\",\n  \"planned_values\": {\n    \"root_module\": {\n      \"resources\": [\n        {\n          \"address\": \"aws_route_table.public\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_route_table\",\n          \"name\": \"public\",\n          \"values\": {\n            \"id\": \"rtb-0a1\",\n            \"route\": [\n              {\n                \"cidr_block\": \"0.0.0.0/0\",\n                \"gateway_id\": \"igw-0a1\"\n              }\n            ]\n          }\n        },\n        {\n          \"address\": \"aws_route_table_association.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_route_table_association\",\n          \"name\": \"web\",\n          \"values\": {\n            \"id\": \"rtbassoc-0a1\",\n            \"subnet_id\": \"subnet-0a1\",\n            \"route_table_id\": \"rtb-0a1\"\n          }\n        },\n        {\n          \"address\": \"aws_subnet.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_subnet\",\n          \"name\": \"web\",\n          \"values\": {\n            \"id\": \"subnet-0a1\",\n            \"map_public_ip_on_launch\": false\n          }\n        },\n        {\n          \"address\": \"aws_security_group.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_security_group\",\n          \"name\": \"web\",\n          \"values\": {\n            \"id\": \"sg-0a1\",\n            \"name\": \"web\",\n            \"ingress\": [\n              {\n                \"from_port\": 443,\n                \"to_port\": 443,\n                \"protocol\": \"tcp\",\n                \"cidr_blocks\": [\n                  \"10.0.0.0/8\"\n                ],\n                \"ipv6_cidr_blocks\": [],\n                \"security_groups\": [],\n                \"self\": false\n              },\n              {\n                \"from_port\": 22,\n                \"to_port\": 22,\n                \"protocol\": \"tcp\",\n                \"cidr_blocks\": [\n                  \"0.0.0.0/0\"\n                ],\n                \"ipv6_cidr_blocks\": [],\n                \"security_groups\": [],\n                \"self\": false\n              }\n            ]\n          }\n        },\n        {\n          \"address\": \"aws_iam_role.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_iam_role\",\n          \"name\": \"web\",\n          \"values\": {\n            \"name\": \"web\",\n            \"path\": \"/\",\n            \"arn\": \"arn:aws:iam::123456789012:role/web\",\n            \"assume_role_policy\": \"{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[{\\\"Effect\\\":\\\"Allow\\\",\\\"Principal\\\":{\\\"Service\\\":\\\"ec2.amazonaws.com\\\"},\\\"Action\\\":\\\"sts:AssumeRole\\\"}]}\"\n          }\n        },\n        {\n          \"address\": \"aws_iam_role_policy_attachment.admin\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_iam_role_policy_attachment\",\n          \"name\": \"admin\",\n          \"values\": {\n            \"id\": \"web-admin\",\n            \"role\": \"web\",\n            \"policy_arn\": \"arn:aws:iam::aws:policy/AdministratorAccess\"\n          }\n        },\n        {\n          \"address\": \"aws_iam_instance_profile.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_iam_instance_profile\",\n          \"name\": \"web\",\n          \"values\": {\n            \"name\": \"web\",\n            \"arn\": \"arn:aws:iam::123456789012:instance-profile/web\",\n            \"role\": \"web\"\n          }\n        },\n        {\n          \"address\": \"aws_instance.web\",\n          \"mode\": \"managed\",\n          \"type\": \"aws_instance\",\n          \"name\": \"web\",\n          \"values\": {\n            \"id\": \"i-0a1\",\n            \"subnet_id\": \"subnet-0a1\",\n            \"vpc_security_group_ids\": [\n              \"sg-0a1\"\n            ],\n            \"iam_instance_profile\": \"web\",\n            \"private_ip\": \"10.0.1.10\",\n            \"public_ip\": \"203.0.113.10\",\n            \"tags\": {\n              \"Name\": \"web-1\"\n            }\n          }\n        }\n      ]\n    }\n  },\n  \"prior_state\": {\n    \"values\": {\n      \"root_module\": {\n        \"resources\": [\n          {\n            \"address\": \"aws_route_table.public\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_route_table\",\n            \"name\": \"public\",\n            \"values\": {\n              \"id\": \"rtb-0a1\",\n              \"route\": [\n                {\n                  \"cidr_block\": \"0.0.0.0/0\",\n                  \"gateway_id\": \"igw-0a1\"\n                }\n              ]\n            }\n          },\n          {\n            \"address\": \"aws_route_table_association.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_route_table_association\",\n            \"name\": \"web\",\n            \"values\": {\n              \"id\": \"rtbassoc-0a1\",\n              \"subnet_id\": \"subnet-0a1\",\n              \"route_table_id\": \"rtb-0a1\"\n            }\n          },\n          {\n            \"address\": \"aws_subnet.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_subnet\",\n            \"name\": \"web\",\n            \"values\": {\n              \"id\": \"subnet-0a1\",\n              \"map_public_ip_on_launch\": false\n            }\n          },\n          {\n            \"address\": \"aws_security_group.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_security_group\",\n            \"name\": \"web\",\n            \"values\": {\n              \"id\": \"sg-0a1\",\n              \"name\": \"web\",\n              \"ingress\": [\n                {\n                  \"from_port\": 443,\n                  \"to_port\": 443,\n                  \"protocol\": \"tcp\",\n                  \"cidr_blocks\": [\n                    \"10.0.0.0/8\"\n                  ],\n                  \"ipv6_cidr_blocks\": [],\n                  \"security_groups\": [],\n                  \"self\": false\n                }\n              ]\n            }\n          },\n          {\n            \"address\": \"aws_iam_role.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_iam_role\",\n            \"name\": \"web\",\n            \"values\": {\n              \"name\": \"web\",\n              \"path\": \"/\",\n              \"arn\": \"arn:aws:iam::123456789012:role/web\",\n              \"assume_role_policy\": \"{\\\"Version\\\":\\\"2012-10-17\\\",\\\"Statement\\\":[{\\\"Effect\\\":\\\"Allow\\\",\\\"Principal\\\":{\\\"Service\\\":\\\"ec2.amazonaws.com\\\"},\\\"Action\\\":\\\"sts:AssumeRole\\\"}]}\"\n            }\n          },\n          {\n            \"address\": \"aws_iam_role_policy_attachment.admin\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_iam_role_policy_attachment\",\n            \"name\": \"admin\",\n            \"values\": {\n              \"id\": \"web-admin\",\n              \"role\": \"web\",\n              \"policy_arn\": \"arn:aws:iam::aws:policy/AdministratorAccess\"\n            }\n          },\n          {\n            \"address\": \"aws_iam_instance_profile.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_iam_instance_profile\",\n            \"name\": \"web\",\n            \"values\": {\n              \"name\": \"web\",\n              \"arn\": \"arn:aws:iam::123456789012:instance-profile/web\",\n              \"role\": \"web\"\n            }\n          },\n          {\n            \"address\": \"aws_instance.web\",\n            \"mode\": \"managed\",\n            \"type\": \"aws_instance\",\n            \"name\": \"web\",\n            \"values\": {\n              \"id\": \"i-0a1\",\n              \"subnet_id\": \"subnet-0a1\",\n              \"vpc_security_group_ids\": [\n                \"sg-0a1\"\n              ],\n              \"iam_instance_profile\": \"web\",\n              \"private_ip\": \"10.0.1.10\",\n              \"public_ip\": \"203.0.113.10\",\n              \"tags\": {\n                \"Name\": \"web-1\"\n              }\n            }\n          }\n        ]\n      }\n    }\n  },\n  \"resource_changes\": [\n    {\n      \"address\": \"aws_route_table.public\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_route_table_association.web\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_subnet.web\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_security_group.web\",\n      \"change\": {\n        \"actions\": [\n          \"update\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_iam_role.web\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_iam_role_policy_attachment.admin\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_iam_instance_profile.web\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    },\n    {\n      \"address\": \"aws_instance.web\",\n      \"change\": {\n        \"actions\": [\n          \"no-op\"\n        ],\n        \"after_unknown\": {}\n      }\n    }\n  ],\n  \"configuration\": {\n    \"provider_config\": {\n      \"aws\": {\n        \"expressions\": {\n          \"region\": {\n            \"constant_value\": \"eu-west-1\"\n          }\n        }\n      }\n    },\n    \"root_module\": {\n      \"resources\": []\n    }\n  }\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{apiUrl}}/gate/impact?source=terraform&slug={{slug}}&sha={{sha}}&pr={{pr}}&account=123456789012",
+							"host": [
+								"{{apiUrl}}"
+							],
+							"path": [
+								"gate",
+								"impact"
+							],
+							"query": [
+								{
+									"key": "source",
+									"value": "terraform"
+								},
+								{
+									"key": "slug",
+									"value": "{{slug}}"
+								},
+								{
+									"key": "sha",
+									"value": "{{sha}}"
+								},
+								{
+									"key": "pr",
+									"value": "{{pr}}"
+								},
+								{
+									"key": "account",
+									"value": "123456789012",
+									"description": "Optional. The AWS account the plan describes, for a plan whose resources are all new and so name none: without it its instances are keyed without an account and do not meet the estate's."
+								}
+							]
+						},
+						"description": "The same question asked of a Terraform plan, before anything is deployed. The body is the plan as `terraform show -json <planfile>` writes it. The plan carries the state it starts from (prior_state) and the state it would leave (planned_values); the engine adds the first to a copy of its graph and applies the second, each written in the shapes the AWS API returns and read by the collectors that read a live account - so a planned instance is judged exposed, and keyed, exactly as a running one.\n\nIn this example web-1 already has a public address in a subnet routed to an internet gateway, and its role is account administrator; its group admits only 10.0.0.0/8. The plan opens SSH to 0.0.0.0/0: the route web-1 -> web -> account-admin is `introduced`.\n\nA value known only after apply - a bucket policy naming the ARN of a bucket the same plan creates - is listed in `incomplete`, and a gate that finds no route reads that as UNKNOWN, not clean. So is what the plan opens of a security group, subnet or route table it did not create: the engine's graph does not hold security groups, so what else uses sg-0a1 is not in view, and `incomplete` names it - here beside the route found, which still blocks. The gate in local mode with `-aws-region` lays the plan over the account's own network instead, and needs no such note. Plans are the gate's alone: /ingest/terraform does not exist, because a plan describes what is not deployed yet."
 					},
 					"response": []
 				},
@@ -938,11 +1194,11 @@
 						"body": {
 							"mode": "graphql",
 							"graphql": {
-								"query": "query ($title: String) { remediationPlan(title: $title) { title coveragePct verification { verified pathsEliminated riskReductionPct removedEdges } } }",
+								"query": "query ($title: String) { remediationPlan(title: $title) { title coveragePct verification { verified pathsEliminated riskReductionPct expectedReduction removedEdges } } }",
 								"variables": "{\"title\": \"{{fixTitle}}\"}"
 							}
 						},
-						"description": "Simulate removing one fix's edge over the current graph and report what it provably eliminates. title: picks the fix (the previous request stores the top one in fixTitle), so only that fix's what-if runs - asking for verification across the whole plan runs one per fix, and a request past 20 of these analyses gets errors for the rest."
+						"description": "Simulate removing one fix's edge over the current graph and report what it provably eliminates - on the same trials before and after, so verified means it removes a path or lowers expectedReduction (the expected number of sensitive assets compromised). title: picks the fix (the previous request stores the top one in fixTitle), so only that fix's what-if runs - asking for verification across the whole plan runs one per fix, and a request past 20 of these analyses gets errors for the rest."
 					}
 				},
 				{
@@ -996,7 +1252,7 @@
 						"body": {
 							"mode": "graphql",
 							"graphql": {
-								"query": "{ attackPaths { id score steps { edgeType from to probability attack { id name tactic } } nodes { name label internetExposed crownJewel } } }",
+								"query": "{ attackPaths { id score steps { edgeType from to probability attack { id name tactic } } nodes { name label internetExposed exposedPorts crownJewel } } }",
 								"variables": ""
 							}
 						},
@@ -1030,7 +1286,7 @@
 								"variables": ""
 							}
 						},
-						"description": "Per-trial edge realization -> P(crown jewel compromised) with a 95% Wilson CI, plus P(at least one compromised) and the expected count. Captures path multiplicity that the per-path product cannot. Edges sharing a weight_cause (same CVE/credential) are coupled comonotonically - one draw per cause per trial, so routes resting on the same weakness fail together instead of counting as independent redundancy (P3); mixtureCompromiseProbability additionally marginalizes over the attacker profiles. Reproducible per seed."
+						"description": "Per-trial edge realization -> P(crown jewel compromised) with a 95% Wilson CI, plus P(at least one compromised) and the expected count. Captures path multiplicity that the per-path product cannot. Edges sharing a weight_cause (declared by the feed, or - for every edge into a CVE - that CVE) are coupled comonotonically - one draw per cause per trial, so routes resting on the same weakness fail together instead of counting as independent redundancy (P3); mixtureCompromiseProbability additionally marginalizes over the attacker profiles. Reproducible per seed."
 					},
 					"response": []
 				},
@@ -1086,7 +1342,7 @@
 						"body": {
 							"mode": "graphql",
 							"graphql": {
-								"query": "{ whatIf(cuts: [{from: \"public-deployer\", to: \"account-admin (effective)\", type: \"CAN_ESCALATE_TO\"}], iterations: 5000) { removedEdges riskReduction beforeRisk { anyCompromiseProbability } afterRisk { anyCompromiseProbability crownJewels { name compromiseProbability } } after { score nodes { name } } } }",
+								"query": "{ whatIf(cuts: [{from: \"public-deployer\", to: \"account-admin (effective)\", type: \"CAN_ESCALATE_TO\"}], iterations: 5000) { removedEdges riskReduction expectedReduction beforeRisk { anyCompromiseProbability } afterRisk { anyCompromiseProbability crownJewels { name compromiseProbability } } after { score nodes { name } } } }",
 								"variables": ""
 							}
 						},
@@ -1211,6 +1467,36 @@
 					}
 				},
 				{
+					"name": "Checked against AWS (lab records)",
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/json"
+							}
+						],
+						"url": {
+							"raw": "{{apiUrl}}/graphql",
+							"host": [
+								"{{apiUrl}}"
+							],
+							"path": [
+								"graphql"
+							]
+						},
+						"body": {
+							"mode": "graphql",
+							"graphql": {
+								"query": "{ labRuns { lab title command region engine ranAt cost agreed disagreed unsettled checks { case question referee aws engine verdict note } } }",
+								"variables": ""
+							}
+						},
+						"description": "How this version's rules were checked on a real AWS account: the latest run of each lab (make public-access-lab-aws, entrypoints-lab-aws, boundary-lab-aws), with every question put both to AWS - S3's judgement of a policy, a stranger's request, IAM's policy simulator - and to the engine. Built into the binary: evidence about the engine, not about the estate it reads. The Accuracy page shows the same records."
+					},
+					"response": []
+				},
+				{
 					"name": "Policy violations",
 					"request": {
 						"method": "POST",
@@ -1261,7 +1547,7 @@
 						"body": {
 							"mode": "graphql",
 							"graphql": {
-								"query": "{ graph { nodes { id label name internetExposed crownJewel runtimeAlert severity cvss } edges { type from to probability attack { id tactic } } } }",
+								"query": "{ graph { nodes { id label name internetExposed exposedPorts exposedManagementPorts crownJewel runtimeAlert severity cvss } edges { type from to probability attack { id tactic } } } }",
 								"variables": ""
 							}
 						},

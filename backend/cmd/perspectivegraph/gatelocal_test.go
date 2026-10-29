@@ -237,6 +237,9 @@ func TestLocalModeAgreesWithTheAnalyzerService(t *testing.T) {
 	ctx := context.Background()
 	o := baseOpts(t)
 	o.reports = []reportSpec{trivySampleSpec(t)}
+	// The per-commit rule, which is what the server's prVerdict answers: the parity this
+	// test holds is between the two ways of computing THAT rule.
+	o.attribution = "commit"
 
 	local, err := localVerdict(ctx, o)
 	if err != nil {
@@ -251,11 +254,11 @@ func TestLocalModeAgreesWithTheAnalyzerService(t *testing.T) {
 	}
 	norm := normalization.New(mgr)
 	events := estateEvents()
-	reportEvents, err := o.parseReports()
+	reports, err := o.parseReports(o.reports, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, ev := range append(reportEvents, events...) {
+	for _, ev := range append(reports.events, events...) {
 		if err := norm.Handle(ctx, ev); err != nil {
 			t.Fatal(err)
 		}
@@ -451,7 +454,7 @@ func TestEstateSourcesAddUpRatherThanOverride(t *testing.T) {
 	o := localOpts{
 		slug: localSlug, sha: localSHA,
 		estate:       writeEstate(t, estateEvents()), // 2 nodes
-		collectAWSFn: func(context.Context) ([]ontology.Event, error) { return fromCloud, nil },
+		collectAWSFn: func(context.Context) (liveRead, error) { return liveRead{events: fromCloud}, nil },
 	}
 
 	got, err := o.collectEstate(context.Background())
@@ -489,7 +492,7 @@ func TestLocalModeStopsWhenTheLiveCollectionFails(t *testing.T) {
 	o := localOpts{
 		slug: localSlug, sha: localSHA,
 		estate:       writeEstate(t, estateEvents()),
-		collectAWSFn: func(context.Context) ([]ontology.Event, error) { return nil, errors.New("AccessDenied") },
+		collectAWSFn: func(context.Context) (liveRead, error) { return liveRead{}, errors.New("AccessDenied") },
 	}
 	if _, err := o.collectEstate(context.Background()); err == nil {
 		t.Fatal("carried on after failing to read the live account")
@@ -553,11 +556,11 @@ func TestATrulyDanglingReferenceStillFails(t *testing.T) {
 func parseTrivyForTest(t *testing.T) []ontology.Event {
 	t.Helper()
 	o := localOpts{slug: localSlug, sha: localSHA, repository: localSlug, reports: []reportSpec{trivySampleSpec(t)}}
-	events, err := o.parseReports()
+	reports, err := o.parseReports(o.reports, true)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return events
+	return reports.events
 }
 
 // Reading NOTHING from the live account - bad credentials, a wrong region, a denied role
@@ -568,8 +571,8 @@ func TestLocalModeFailsWhenTheLiveReadReturnedNothing(t *testing.T) {
 	o := localOpts{
 		slug: localSlug, sha: localSHA,
 		estate: writeEstate(t, standaloneEstate()), // a perfectly readable file
-		collectAWSFn: func(context.Context) ([]ontology.Event, error) {
-			return nil, errors.New("InvalidClientTokenId")
+		collectAWSFn: func(context.Context) (liveRead, error) {
+			return liveRead{}, errors.New("InvalidClientTokenId")
 		},
 	}
 	_, err := o.collectEstate(context.Background())
@@ -593,8 +596,8 @@ func TestPartialEstateTurnsACleanVerdictIntoUnknown(t *testing.T) {
 		slug: localSlug, sha: localSHA, repository: localSlug,
 		reports: []reportSpec{trivySampleSpec(t)},
 		estate:  writeEstate(t, standaloneEstate()),
-		collectAWSFn: func(context.Context) ([]ontology.Event, error) {
-			return standaloneEstate(), partial // read something, but not everything
+		collectAWSFn: func(context.Context) (liveRead, error) {
+			return liveRead{events: standaloneEstate()}, partial // read something, but not everything
 		},
 	}
 	v, err := localVerdict(context.Background(), o)

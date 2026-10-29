@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/luiacuaniello/perspectivegraph/internal/analyzer"
+	remediationpkg "github.com/luiacuaniello/perspectivegraph/internal/remediation"
 	"github.com/luiacuaniello/perspectivegraph/pkg/ontology"
 )
 
@@ -18,16 +19,16 @@ import (
 // logging + GitHub PR comments).
 type MultiSink []analyzer.Sink
 
-func (m MultiSink) OnCriticalPaths(ctx context.Context, paths []analyzer.AttackPath) {
+func (m MultiSink) OnCriticalPaths(ctx context.Context, tenant string, paths []analyzer.AttackPath) {
 	for _, s := range m {
-		s.OnCriticalPaths(ctx, paths)
+		s.OnCriticalPaths(ctx, tenant, paths)
 	}
 }
 
 // ConsoleSink renders critical paths to the log. It satisfies analyzer.Sink.
 type ConsoleSink struct{}
 
-func (ConsoleSink) OnCriticalPaths(_ context.Context, paths []analyzer.AttackPath) {
+func (ConsoleSink) OnCriticalPaths(_ context.Context, _ string, paths []analyzer.AttackPath) {
 	for _, p := range paths {
 		slog.Warn("critical attack path detected",
 			"id", p.ID,
@@ -48,7 +49,7 @@ func RenderPath(p analyzer.AttackPath) string {
 
 	for i, n := range p.Nodes {
 		indent := strings.Repeat("   ", i)
-		fmt.Fprintf(&b, "%s%s [%s] %s%s\n", indent, connector(i), n.Label, n.Name, badges(n))
+		fmt.Fprintf(&b, "%s%s [%s] %s%s\n", indent, connector(i), n.Label, remediationpkg.OneLine(n.Name), badges(n))
 		if i < len(p.Steps) {
 			st := p.Steps[i]
 			fmt.Fprintf(&b, "%s   └─%s (p=%.2f)─▶\n", indent, st.EdgeType, st.Probability)
@@ -66,7 +67,7 @@ func connector(i int) string {
 
 func badges(n ontology.Node) string {
 	var out string
-	if n.Bool(ontology.PropInternetExposed) {
+	if n.InternetExposed() {
 		out += "  🌐 internet-exposed"
 	}
 	if n.Bool(ontology.PropCrownJewel) {

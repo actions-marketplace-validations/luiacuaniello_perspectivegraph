@@ -41,7 +41,7 @@ The service name depends on the release name, which is why the command looks it 
 
 A new install starts empty: the graph fills up as scanner output reaches the ingest
 endpoint. The
-[manual](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/MANUAL.md#1-the-order-that-builds-a-correct-graph)
+[manual](https://docs.a3thinker.it/manual/onboarding/#1-the-order-that-builds-a-correct-graph)
 shows what to send, and in which order.
 
 ## Requirements
@@ -77,7 +77,12 @@ helm install perspectivegraph ./perspectivegraph \
   --set postgres.externalHost=db.internal --set ingress.host=pg.example.com
 ```
 
-Create the Secret first: the production file lists the keys it expects.
+Create the Secret first: the production file lists the keys it expects. Or let the chart
+generate them, with `--set secrets.existingSecret="" --set secrets.generate=true` and the
+database's own password (`postgres.auth.password`): it keeps them across upgrades, and the
+release notes say how to read the admin token back. On AWS or GCP, where
+no managed PostgreSQL offers AGE, add `--set postgres.cloudnativepg.enabled=true` instead of
+`postgres.externalHost` to have the CloudNativePG operator run the database in the cluster.
 
 ## The values to read first
 
@@ -86,11 +91,21 @@ Create the Secret first: the production file lists the keys it expects.
 | `auth.apiTokens` / `auth.oidc` | empty | Authentication stays off until you set one of them. Without it, anyone who can reach the service can read your attack paths. |
 | `auth.anonymousRole` | empty | `viewer` publishes the install read-only, like the live demo: visitors can look around and every change is refused. Set `backend.trustedProxyCidrs` to your ingress controller's pod network as well, so rate limits apply to each visitor rather than to all of them at once. |
 | `postgres.enabled` | `true` | The bundled database, meant for trying things out. In production, set it to `false` and point `postgres.externalHost` (or `postgres.dsn`) at your own PostgreSQL+AGE. |
+| `postgres.cloudnativepg.enabled` | `false` | Hands the database to the [CloudNativePG](https://cloudnative-pg.io) operator, installed beforehand: a primary with replicas and failover, TLS the backend verifies, and continuous backups to object storage when `backup.objectStore` names a Barman Cloud `ObjectStore`. The answer on AWS and GCP, where no managed PostgreSQL offers AGE. Replaces the bundled database; see [the guide](https://docs.a3thinker.it/manual/kubernetes/#a-production-database-cloudnativepg). |
+| `secrets.generate` | `false` | Fills every credential left empty with a generated one, kept across upgrades: an admin API token (unless OIDC is set), the ingest HMAC secret, the encryption and signing keys. With `values-production.yaml`, add `--set secrets.existingSecret="" --set secrets.generate=true` to install without preparing a Secret - plus `postgres.auth.password`, which only your database knows, unless `postgres.cloudnativepg.enabled` runs it. Not for `helm template` (Argo CD, Flux), which would draw new values every render. |
+| `serviceAccount` | created | The backend's own service account, with no Kubernetes API token mounted (no pod in the chart mounts one). On EKS, bind the AWS connector's read-only role to it with EKS Pod Identity, or IRSA via `serviceAccount.annotations`; `deploy/aws` in the repository has the role. |
+| `connectors.enabled` | empty | `kubernetes` reads the cluster the chart is installed in, on a schedule, instead of waiting for a posted dump; set `connectors.kubernetes.clusterName` too (on EKS, the EKS name). The backend's service account gets `get`/`list` on pods, services, service accounts, nodes, ingresses and RBAC objects, and the `aws-auth` config map by name - never secrets. `aws` and `azure` read cloud accounts. |
+| `postgres.auth.password` | generated | Empty gives the bundled database a random password, kept across upgrades; an existing install keeps the one it has. Required for an external database. With `helm template` (Argo CD, Flux) set it, or use `secrets.existingSecret`: a render without the cluster cannot keep a generated one. |
+| `nats.auth` | on, generated | The bundled NATS requires `nats.auth.user` and a password generated into its own Secret (or `nats.auth.password` / `nats.auth.existingSecret`), and the backend presents them - without it any pod could publish events past the ingest signature check. An external NATS gets credentials only when you set them. |
+| `nats.persistence.enabled` | `true` | A volume for the event stream, so queued events and dead letters survive a NATS restart. |
+| `networkPolicy.enabled` | `false` | Only the backend may reach the bundled NATS and Postgres (`postgresFrom` adds, say, a backup job). `backendFrom` also limits who may call the backend - typically the ingress controller's namespace. On in `values-production.yaml`; inert on a CNI that does not enforce NetworkPolicy. |
 | `governanceBackend` | `file` | Where triage decisions, tickets, validation verdicts and the audit log are kept. `postgres` is what makes more than one backend replica possible. |
 | `persistence.enabled` | `false` | A volume for the `file` backend, so that data survives restarts. It supports a single replica, and the chart won't render it with more. |
 | `backend.replicas` | `1` | More than one needs `governanceBackend: postgres`. |
 | `repoAllowlist` | empty | The repositories the engine may write to: PR comments, merge-gate statuses and fix PRs. Empty means none. |
+| `prAttribution` | `diff` | Which routes the commit status and PR comments count against a commit: `diff`, those it opened or made likelier (the merge gate's rule); `commit`, every route through it (before 1.22). |
 | `ingress.enabled` | `false` | Publishes the dashboard, the API and the ingest endpoint. The chart won't render it without authentication, unless you set `ingress.allowUnauthenticated: true`. |
+| `ingress.maxBodySize` | `32m` | The largest scanner report the ingress passes to `/ingest` and `/gate`: the backend's own limit. Rendered as the body-size annotation of ingress-nginx and F5 NGINX, whose 1 MiB default refuses real reports; an annotation you set wins. |
 | `service.type` | `ClusterIP` | `LoadBalancer` or `NodePort` expose the backend outside the cluster, with the same authentication check as the ingress. |
 | `ai.apiKey` | empty | Turns on the AI assistant through Anthropic's API (`ai.hf` takes an OpenAI-compatible endpoint instead). Once it's on, details of your attack paths are sent to that provider. |
 
@@ -107,16 +122,16 @@ each with a comment explaining it.
   images are signed.
 - The audit log is a hash chain, so any edit to past records shows.
 
-The [threat model](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/THREAT-MODEL.md)
+The [threat model](https://docs.a3thinker.it/threat-model/)
 explains what isn't covered and what's left to you as the operator.
 
 ## Documentation
 
-- [Operations runbook](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/OPERATIONS.md): where to get PostgreSQL+AGE, backups and restores, upgrades, the production checklist
-- [Manual](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/MANUAL.md): architecture, scoring, what to send and how
-- [Scale](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/SCALE.md): measured sizing, and how to measure your own graph
-- [Upgrade notes](https://github.com/luiacuaniello/perspectivegraph/blob/main/docs/UPGRADING.md): the releases that need something from you
-- [Support policy](https://github.com/luiacuaniello/perspectivegraph/blob/main/SUPPORT.md): which versions get fixes, and how quickly
+- [Operations runbook](https://docs.a3thinker.it/operations/): where to get PostgreSQL+AGE, backups and restores, upgrades, the production checklist
+- [Documentation](https://docs.a3thinker.it/): architecture, scoring, what to send and how, with search
+- [Scale](https://docs.a3thinker.it/scale/): measured sizing, and how to measure your own graph
+- [Upgrade notes](https://docs.a3thinker.it/upgrading/): the releases that need something from you
+- [Support policy](https://docs.a3thinker.it/support/): which versions get fixes, and how quickly
 
 Apache-2.0. Issues and pull requests are welcome on
 [GitHub](https://github.com/luiacuaniello/perspectivegraph).

@@ -21,10 +21,13 @@
 // yields a lower-probability escalation edge than an account-wide one, since it
 // depends on those targets being privileged.
 //
-// Honest simplifications (documented, not hidden): Condition keys, NotAction /
-// NotResource and SCPs are not evaluated, and a Deny confined to specific
-// resources is ignored. Detection therefore still errs toward over-reporting
-// rather than missing.
+// Honest simplifications (documented, not hidden): Condition keys and SCPs are not
+// evaluated, a Deny confined to specific resources (by Resource or NotResource) is
+// ignored, and so is a Deny written with NotAction. An Allow under a condition counts
+// as granted; a Deny under one is not applied, and what it might block is reported as
+// unverified. Each of these errs toward reporting an escalation rather than missing
+// one - which was not true before 1.28.3, when an Allow written with NotAction was not
+// read at all and a conditional Deny was applied as if it always held.
 package iam
 
 import (
@@ -144,10 +147,16 @@ func (d *policyDoc) UnmarshalJSON(b []byte) error {
 }
 
 type statement struct {
-	Effect    string         `json:"Effect"`
-	Action    stringOrSlice  `json:"Action"`
-	Resource  stringOrSlice  `json:"Resource"`
-	Principal trustPrincipal `json:"Principal"`
+	Effect      string         `json:"Effect"`
+	Action      stringOrSlice  `json:"Action"`
+	NotAction   stringOrSlice  `json:"NotAction"`
+	Resource    stringOrSlice  `json:"Resource"`
+	NotResource stringOrSlice  `json:"NotResource"`
+	Principal   trustPrincipal `json:"Principal"`
+	// Condition is kept only to know whether there is one: its keys are not evaluated
+	// (see the package note), but a trust statement admitting "*" under a condition -
+	// aws:PrincipalOrgID, sts:ExternalId - is not open to anyone.
+	Condition map[string]any `json:"Condition,omitempty"`
 }
 
 // stringOrSlice decodes a JSON field that IAM expresses as either a single
@@ -174,9 +183,10 @@ func (s *stringOrSlice) UnmarshalJSON(b []byte) error {
 // trustPrincipal models the "Principal" of a role trust statement: the literal
 // "*" (anyone), or an object with AWS/Service/Federated members.
 type trustPrincipal struct {
-	All     bool
-	AWS     stringOrSlice
-	Service stringOrSlice
+	All       bool
+	AWS       stringOrSlice
+	Service   stringOrSlice
+	Federated stringOrSlice // OIDC/SAML providers: an ARN, or a bare issuer
 }
 
 func (p *trustPrincipal) UnmarshalJSON(b []byte) error {
@@ -192,13 +202,14 @@ func (p *trustPrincipal) UnmarshalJSON(b []byte) error {
 		return nil
 	}
 	var obj struct {
-		AWS     stringOrSlice `json:"AWS"`
-		Service stringOrSlice `json:"Service"`
+		AWS       stringOrSlice `json:"AWS"`
+		Service   stringOrSlice `json:"Service"`
+		Federated stringOrSlice `json:"Federated"`
 	}
 	if err := json.Unmarshal(b, &obj); err != nil {
 		return err
 	}
-	p.AWS, p.Service = obj.AWS, obj.Service
+	p.AWS, p.Service, p.Federated = obj.AWS, obj.Service, obj.Federated
 	for _, a := range obj.AWS {
 		if a == "*" {
 			p.All = true
@@ -269,7 +280,7 @@ func (c *Collector) Parse(r io.Reader, _ ingestion.Options) ([]ontology.Event, e
 		// "everything in account X" is one filter across identities and infrastructure
 		// rather than two different questions.
 		props := map[string]any{ontology.PropARN: u.Arn}
-		if acct := accountFromARN(u.Arn); acct != "" {
+		if acct := ingestion.AccountFromARN(u.Arn); acct != "" {
 			props[ontology.PropAccount] = acct
 		}
 		// Credential-origin threat model (opt-in): treat an IAM user as a seed on the
@@ -298,7 +309,7 @@ func (c *Collector) Parse(r io.Reader, _ ingestion.Options) ([]ontology.Event, e
 		effective := capByBoundary(allowedActions(docs), u.PermissionsBoundary, managed, props)
 
 		g.upsert(ontology.Node{ID: id, Label: ontology.LabelUser, Name: u.UserName, Properties: props})
-		g.escalation(id, effective, adminID)
+		g.escalation(id, effective, adminID, asUser)
 	}
 
 	// Roles.
@@ -309,7 +320,7 @@ func (c *Collector) Parse(r io.Reader, _ ingestion.Options) ([]ontology.Event, e
 		id := ontology.NewID(ontology.LabelIAMRole, ro.Arn)
 		arnToID[ro.Arn] = id
 		props := map[string]any{ontology.PropARN: ro.Arn}
-		if acct := accountFromARN(ro.Arn); acct != "" {
+		if acct := ingestion.AccountFromARN(ro.Arn); acct != "" {
 			props[ontology.PropAccount] = acct
 		}
 		tags := map[string]string{}
@@ -317,10 +328,14 @@ func (c *Collector) Parse(r io.Reader, _ ingestion.Options) ([]ontology.Event, e
 			tags[t.Key] = t.Value
 		}
 		ingestion.MarkCrownJewelFromTags(props, tags)
-		// A role anyone can assume is, in effect, internet-reachable.
-		if trustsEveryone(ro.AssumeRolePolicyDocument) {
+		// A role anyone can assume is, in effect, internet-reachable. Without a condition
+		// on that trust it is more than reachable: anyone holds it.
+		if everyone, unconditionally := trustsEveryone(ro.AssumeRolePolicyDocument); everyone {
 			props[ontology.PropInternetExposed] = true
 			props["public_trust"] = true
+			if unconditionally {
+				props[ontology.PropPublicAccess] = true
+			}
 		}
 
 		var docs []policyDoc
@@ -334,8 +349,19 @@ func (c *Collector) Parse(r io.Reader, _ ingestion.Options) ([]ontology.Event, e
 		}
 		effective := capByBoundary(allowedActions(docs), ro.PermissionsBoundary, managed, props)
 
+		// A trust in a public OIDC issuer is a door from wherever that issuer's users are.
+		// Open - no subject pinned to an owner - it is a door from the internet.
+		for _, ft := range federatedTrusts(ro.AssumeRolePolicyDocument) {
+			idp := federatedNode(ft)
+			g.upsert(idp)
+			g.edge(ontology.EdgeAuthenticates, idp.ID, id, federatedAssumeProb)
+			if ft.open {
+				props["federated_trust_open"] = true
+			}
+		}
+
 		g.upsert(ontology.Node{ID: id, Label: ontology.LabelIAMRole, Name: ro.RoleName, Properties: props})
-		g.escalation(id, effective, adminID)
+		g.escalation(id, effective, adminID, asRole)
 	}
 
 	// Second pass: role chaining - a principal the trust policy names can assume
@@ -371,7 +397,9 @@ func allowedActions(docs []policyDoc) actionSet {
 	var a actionSet
 	for _, d := range docs {
 		for _, st := range d.Statement {
-			broad := resourceIsBroad(st.Resource)
+			// NotResource names what a statement does NOT cover, so it reaches everything
+			// else: account-wide for an Allow, and never the whole account for a Deny.
+			broad := len(st.NotResource) > 0 || resourceIsBroad(st.Resource)
 			switch {
 			case strings.EqualFold(st.Effect, "Allow"):
 				for _, act := range st.Action {
@@ -381,15 +409,26 @@ func allowedActions(docs []policyDoc) actionSet {
 						a = a.addScoped(act)
 					}
 				}
+				// "Allow everything but X" grants a great deal; reading only Action, the
+				// engine used to see nothing at all here and missed every escalation in it.
+				if len(st.NotAction) > 0 {
+					a = a.addAllBut(broad, st.NotAction)
+				}
 			case strings.EqualFold(st.Effect, "Deny"):
 				// Only an account-wide Deny is unambiguous. A Deny confined to specific
-				// resources still leaves the action available elsewhere, so honoring it
-				// here could hide a real escalation: we keep the over-report bias.
-				if !broad {
+				// resources - or to all but some, with NotResource - still leaves the
+				// action available elsewhere, so honoring it here could hide a real
+				// escalation: we keep the over-report bias. A Deny written with NotAction
+				// is not applied either, for the same reason.
+				if !broad || len(st.NotResource) > 0 {
 					continue
 				}
 				for _, act := range st.Action {
-					a = a.deny(act)
+					if len(st.Condition) > 0 {
+						a = a.denyUnder(act)
+					} else {
+						a = a.deny(act)
+					}
 				}
 			}
 		}
@@ -402,6 +441,7 @@ func allowedActions(docs []policyDoc) actionSet {
 const (
 	propPermissionsBoundary = "permissions_boundary"
 	propBoundaryUnresolved  = "permissions_boundary_unresolved"
+	propDenyConditional     = "deny_condition_unevaluated"
 )
 
 // capByBoundary applies a principal's permissions boundary to what its identity
@@ -448,13 +488,16 @@ func resourceIsBroad(rs stringOrSlice) bool {
 }
 
 // trustsEveryone reports whether any Allow statement lets "*" assume the role.
-func trustsEveryone(doc policyDoc) bool {
+func trustsEveryone(doc policyDoc) (everyone, unconditionally bool) {
 	for _, st := range doc.Statement {
 		if strings.EqualFold(st.Effect, "Allow") && st.Principal.All {
-			return true
+			everyone = true
+			if len(st.Condition) == 0 {
+				unconditionally = true
+			}
 		}
 	}
-	return false
+	return everyone, unconditionally
 }
 
 // ── builder + helpers ───────────────────────────────────────────────
@@ -473,37 +516,50 @@ const (
 	// privileged, which the policy alone cannot tell us - so it stays on the graph
 	// at a materially lower probability instead of being asserted or dropped.
 	scopedPrivescProb = 0.5
+	// conditionalDenyProb caps an escalation that a Deny under a condition might block:
+	// it is real when the condition does not hold - no MFA required of the attacker's
+	// session, say - and blocked when it does, and the policy alone cannot tell which.
+	conditionalDenyProb = 0.5
 	// unresolvedBoundaryProb caps the score when a permissions boundary is attached
 	// but its document was not in the input, so the intersection cannot be computed.
 	// The claim is reported (an AdministratorAccess boundary is a common no-op, and
 	// dropping the edge would miss it) at a probability that says it is unverified.
 	unresolvedBoundaryProb = 0.5
+	// federatedAssumeProb is a workflow on the issuer trading its token for the role:
+	// one published API call, AssumeRoleWithWebIdentity, given the role's ARN.
+	federatedAssumeProb = 0.9
 	// adminProb is an already-admin principal: nothing has to be exploited at all.
 	adminProb = 0.99
 )
 
 // escalation draws the principal's edge to account-admin, if any: a direct edge
 // when it is already admin, or one labelled with the matched privesc primitives.
-func (b *builder) escalation(principalID string, actions actionSet, adminID string) {
+func (b *builder) escalation(principalID string, actions actionSet, adminID string, kind principalKind) {
 	if principalID == adminID {
 		return
 	}
 	if actions.IsAdmin() {
 		props := map[string]any{"reason": "already administrator-equivalent (Allow *:*)"}
 		prob := noteBoundary(props, actions, adminProb)
+		if actions.conditionallyDenied("*") {
+			prob = noteCondition(props, prob)
+		}
 		b.edgeWith(ontology.EdgeCanEscalateTo, principalID, adminID, prob, props)
 		return
 	}
-	matches := detectPrivesc(actions)
+	matches := detectPrivesc(actions, kind)
 	if len(matches) == 0 {
 		return
 	}
 	names := make([]string, 0, len(matches))
-	scopedOnly := true
+	scopedOnly, conditionalOnly := true, true
 	for _, m := range matches {
 		names = append(names, m.Name)
 		if !m.ScopedOnly {
 			scopedOnly = false
+		}
+		if !m.Conditional {
+			conditionalOnly = false
 		}
 	}
 	prob := privescProb
@@ -517,7 +573,22 @@ func (b *builder) escalation(principalID string, actions actionSet, adminID stri
 		props["scope_note"] = "granted only on specific resources; escalation depends on those targets being privileged"
 	}
 	prob = noteBoundary(props, actions, prob)
+	if conditionalOnly {
+		// Every technique that matched needs an action a conditional Deny covers. Not
+		// applying the Deny would claim the escalation outright; applying it, as the
+		// engine used to, would hide one that is real whenever the condition is not met.
+		prob = noteCondition(props, prob)
+	}
 	b.edgeWith(ontology.EdgeCanEscalateTo, principalID, adminID, prob, props)
+}
+
+// noteCondition records that a Deny the engine cannot evaluate might block the
+// escalation, and returns the probability to score it at.
+func noteCondition(props map[string]any, prob float64) float64 {
+	props[propDenyConditional] = true
+	props["condition_note"] = "a Deny on the actions this needs applies only under a condition the policy cannot settle " +
+		"(MFA, source address, a tag); the escalation holds when that condition is not met, so it is reported unverified"
+	return min(prob, conditionalDenyProb)
 }
 
 // noteBoundary records what the permissions boundary contributed to a surviving
@@ -581,19 +652,4 @@ func (b *builder) nodeSlice() []ontology.Node {
 		out = append(out, n)
 	}
 	return out
-}
-
-// accountFromARN pulls the account id out of an ARN
-// (arn:partition:service:region:ACCOUNT:resource), returning "" for anything that does
-// not have one - AWS-managed policies (arn:aws:iam::aws:policy/…) carry the literal
-// "aws" there, and service-linked shapes can leave it empty, so this must not guess.
-func accountFromARN(arn string) string {
-	parts := strings.Split(arn, ":")
-	if len(parts) < 6 {
-		return ""
-	}
-	if acct := parts[4]; acct != "" && acct != "aws" {
-		return acct
-	}
-	return ""
 }

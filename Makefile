@@ -1,5 +1,5 @@
 .DEFAULT_GOAL := help
-.PHONY: help chart-install up up-full up-demo demo demo-build demo-run up-search down logs run-backend build-backend test bench bench-cloudgoat mcp reachability-lab-aws redteam-aws boundary-lab-aws tidy run-frontend install-frontend lockfile seed seed-discovery seed-load clean
+.PHONY: help chart-install up up-full up-demo up-aws prod-init prod-restore prod-smoke demo demo-needs demo-build demo-run up-search down logs run-backend build-backend test bench bench-cloudgoat mcp reachability-lab-aws redteam-aws boundary-lab-aws entrypoints-lab-aws public-access-lab-aws terraform-lab-aws tidy run-frontend install-frontend lockfile docs-site seed seed-discovery seed-load clean
 
 # CGO is disabled so the Go binaries link statically (Go's pure-Go DNS resolver
 # instead of the system one). This also sidesteps a macOS system-linker bug on
@@ -22,11 +22,18 @@ up-full:
 up-demo:
 	docker compose -f docker-compose.yml -f docker-compose.demo.yml --profile app up -d
 
-## demo: the wedge in ~90s - published images, seeded, with the top attack path + its fix (needs jq)
-demo: up-demo demo-run
+## demo: the engine in ~90s - published images, seeded, with the top attack path + its fix (needs Docker, curl and jq)
+demo: demo-needs up-demo demo-run
 
 ## demo-build: the same demo, but built from this working tree (for contributors)
-demo-build: up-full demo-run
+demo-build: demo-needs up-full demo-run
+
+# Said before anything starts: without jq or curl the seed fails where nobody is looking,
+# and the demo ends ninety seconds later on an empty answer.
+demo-needs:
+	@for tool in docker curl jq; do \
+	  command -v $$tool >/dev/null 2>&1 || { echo "make demo needs $$tool on your PATH, and did not find it"; exit 1; }; \
+	done
 
 demo-run:
 	@echo ""
@@ -34,11 +41,18 @@ demo-run:
 	@$(MAKE) --no-print-directory seed          >/dev/null 2>&1 || true
 	@$(MAKE) --no-print-directory seed-discovery >/dev/null 2>&1 || true
 	@printf "→ correlating findings into reachable attack paths"
-	@for i in $$(seq 1 30); do \
+	@n=0; for i in $$(seq 1 30); do \
 	  n=$$(curl -s -X POST http://localhost:8080/graphql -H 'Content-Type: application/json' \
 	    -d '{"query":"{ attackPaths(limit:1){ id } }"}' 2>/dev/null | jq -r '.data.attackPaths | length' 2>/dev/null); \
 	  if [ "$$n" = "1" ]; then break; fi; printf "."; sleep 3; \
-	done; echo ""
+	done; echo ""; \
+	if [ "$$n" != "1" ]; then \
+	  echo ""; \
+	  echo "No attack path appeared within 90 seconds, so there is nothing to show."; \
+	  echo "The backend's log says why:   docker compose logs backend | tail -40"; \
+	  echo "What the seed was answered:   make seed"; \
+	  exit 1; \
+	fi
 	@echo ""
 	@echo "════════ TOP ATTACK PATH  (internet → crown jewel, ranked) ════════"
 	@curl -s -X POST http://localhost:8080/graphql -H 'Content-Type: application/json' \
@@ -46,15 +60,31 @@ demo-run:
 	  | jq '.data.attackPaths[0]'
 	@echo ""
 	@echo "→ Open the dashboard: http://localhost:3000  (see the kill chain, then click 'Open fix PR')"
-	@echo "  Make the fix a REAL pull request: set GITHUB_TOKEN on a sandbox repo - see docs/MANUAL.md."
+	@echo "  Make the fix a REAL pull request: set GITHUB_TOKEN on a sandbox repo - see docs/manual/ci-gate.md."
 	@echo ""
-	@echo "  The 'Trust' view reads 'insufficient data' on purpose: no outcomes have been"
+	@echo "  The 'Accuracy' view reads 'insufficient data' on purpose: no outcomes have been"
 	@echo "  recorded, so the scores are estimates, and the page says so instead of inventing"
 	@echo "  a verdict. To watch the instrument work, 'make seed-validation' records SYNTHETIC"
 	@echo "  verdicts (derived from the scores, so the calibration it produces is a"
 	@echo "  demonstration, not evidence)."
 	@echo ""
 	@echo "  Tear down when done: make down"
+
+## up-aws: the stack reading YOUR AWS account live, read-only (AWS_PROFILE, AWS_REGION, optional AWS_ROLE_ARN)
+up-aws:
+	@bash scripts/up-aws.sh
+
+## prod-init: production on ONE machine - secrets, .env, Caddy TLS, NATS auth, daily backups, started (DOMAIN=<name>)
+prod-init:
+	@bash scripts/prod-init.sh $(DOMAIN)
+
+## prod-restore: replace the single-VM stack's database with a dump (DUMP=backups/<file>)
+prod-restore:
+	@bash scripts/prod-restore.sh $(DUMP)
+
+## prod-smoke: run the single-VM recipe end to end in a scratch copy and check it (needs ports 80/443, Go)
+prod-smoke:
+	@bash scripts/prod-smoke.sh
 
 ## up-search: start infra plus the optional OpenSearch full-text index
 up-search:
@@ -103,13 +133,25 @@ reachability-lab-aws:
 boundary-lab-aws:
 	./scripts/boundary-lab-aws.sh
 
+## entrypoints-lab-aws: check the 1.29.0 entry points on a REAL account, with AWS as the referee where it gives one - nine bucket policies against GetBucketPolicyStatus, function URLs against an unauthenticated request (403 = closed), ECS services in a routed, an unrouted and an ACL-filtered subnet, an internet-facing and an internal load balancer against an HTTP request to each, API Gateway routes (open, behind a JWT authorizer, behind a policy that denies everyone outside a network) against an unauthenticated request to each, a GitHub OIDC trust pinned to one repository. The engine reads it all as a SecurityAudit-only role. FAILS on any disagreement. Costs a few cents - the two load balancers bill by the hour for the minutes the lab is up; no instance, no NAT, functions never run, buckets empty and behind RestrictPublicBuckets - and tears itself down on exit. KEEP=1 leaves it up; --teardown cleans a leaked lab. Needs an AWS profile (PROFILE=, REGION=).
+entrypoints-lab-aws:
+	./scripts/entrypoints-lab-aws.sh
+
+## public-access-lab-aws: check S3 Block Public Access on a REAL account - set on a bucket, and set on the whole account - with AWS as the referee: GetBucketPolicyStatus on each policy and an anonymous request to each bucket (403 = closed). FAILS on any disagreement, and if the engine, told nothing of the account's settings, does not err toward open. Free: two empty buckets, and no stranger ever gets in. Refuses to run where the account already has account-level Block Public Access, and deletes the one it sets. CONTROL=1 also lifts the account's setting for about a minute to show the referee answering "open"; --teardown cleans a leaked lab. Needs an AWS profile (PROFILE=, REGION=).
+public-access-lab-aws:
+	./scripts/public-access-lab-aws.sh
+
+## terraform-lab-aws: check the merge gate on Terraform plans on a REAL account, with AWS as the referee - five plans against one applied stack (open the instance's group, deny the port in its network ACL, delete that deny, change nothing, and open a group another configuration manages), each judged by the gate alone and with the account read as a SecurityAudit-only role, then applied and graded by a TCP connection from the internet; the instance's role against IAM's policy simulator. FAILS on any disagreement, and if the plan that reaches beyond its configuration is not unknown alone. Needs terraform. Costs a few cents - a t3.micro and its public address for about ten minutes - and tears itself down on exit; Terraform's state stays in STATE_DIR. KEEP=1 leaves it up; --teardown destroys a leaked lab. Needs an AWS profile (PROFILE=, REGION=).
+terraform-lab-aws:
+	./scripts/terraform-lab-aws.sh
+
 ## bench-cloudgoat: grade the attack-path engine against CloudGoat-shaped ground-truth scenarios (precision/recall). Runs in CI under `make test`; this target prints the per-scenario table. Add scenarios under backend/testdata/cloudgoat (see its README).
 bench-cloudgoat:
 	cd backend && $(GO) test ./internal/benchmark -run TestCloudGoatBenchmark -v
 
 ## fuzz: fuzz the collector parse boundary (attacker-influenceable input) for panics/OOM. Runs every FuzzXxx briefly (FUZZTIME per target, default 20s). Deep run: cd backend && go test ./internal/ingestion/fuzz -run x -fuzz FuzzCloudnet -fuzztime 5m
 fuzz:
-	@cd backend && for t in FuzzCloudnet FuzzIAM FuzzK8s FuzzTrivy FuzzSemgrep FuzzFalco FuzzCustodian FuzzSupplychain FuzzSSO FuzzDataclass FuzzBuild; do \
+	@cd backend && for t in FuzzCloudnet FuzzIAM FuzzK8s FuzzTrivy FuzzSemgrep FuzzFalco FuzzCustodian FuzzSupplychain FuzzSSO FuzzDataclass FuzzBuild FuzzEKS FuzzLambda FuzzAPIGateway FuzzTerraform FuzzTerraformEdge; do \
 	  echo "== $$t =="; $(GO) test ./internal/ingestion/fuzz -run x -fuzz $$t -fuzztime $(or $(FUZZTIME),20s) || exit 1; \
 	done
 
@@ -119,11 +161,18 @@ install-frontend:
 
 ## lockfile: regenerate frontend/package-lock.json after changing package.json. Runs npm INSIDE the same Linux image the release build uses, because npm only records the transitive deps of optional platform packages for the platform it runs on - regenerating on macOS drops entries the Linux build needs and breaks `npm ci` in CI. Never run a bare `npm install` in frontend/ to add a dependency; edit package.json, then run this.
 lockfile:
-	image="$$(scripts/node-image.sh)" && docker run --rm -v "$(CURDIR)/frontend":/app -w /app "$$image" \
-	  npm install --package-lock-only --no-audit --no-fund
+	image="$$(scripts/node-image.sh)" && for dir in frontend site; do \
+	  docker run --rm -v "$(CURDIR)/$$dir":/app -w /app "$$image" \
+	    npm install --package-lock-only --no-audit --no-fund || exit 1; \
+	done
 	@echo ""
-	@echo "→ regenerated frontend/package-lock.json on linux. Verify before committing:"
-	@echo "    git diff --stat frontend/package-lock.json"
+	@echo "→ regenerated frontend/ and site/ package-lock.json on linux. Verify before committing:"
+	@echo "    git diff --stat frontend/package-lock.json site/package-lock.json"
+
+## docs-site: build the documentation site (docs.a3thinker.it) from docs/ - fails on any broken link or anchor
+docs-site:
+	cd site && npm ci --no-audit --no-fund && npm run build
+	@echo "→ built site/dist. Preview it with: cd site && npm run preview"
 
 ## run-frontend: start the Vite dev server
 run-frontend:
@@ -189,27 +238,35 @@ seed-discovery:
 
 ## seed-validation: record sample red-team/BAS verdicts on every current path (outcome correlated with the predicted score, plus a detection report on confirmed ones) so precision/recall AND the calibration panel + diagnostics (Brier/ECE, segments, detection, diagnosis) light up
 seed-validation:
-	@echo "→ recording scored red-team/BAS verdicts on every path → precision/recall + calibration diagnostics"
+	@echo "→ recording SYNTHETIC red-team/BAS verdicts on part of the paths → precision/recall + calibration diagnostics"
+	@# A BAS run tests some routes, not all of them, and its outcomes do not line up with the
+	@# scores: a route at 90% can fail and one at 30% can work. Testing every path and
+	@# confirming each one scored at 50% or more made every tested route P1 (11 of 14 on the
+	@# sample data) and an order no real test produces (AUC 1.00). So: about 40% of the
+	@# paths plus every one a runtime alert fired on, confirmed with probability equal to its
+	@# score, and "detected" only where that alert fired. Deterministic - both draws come
+	@# from a hash of the path id - so every run records the same verdicts.
 	@for i in $$(seq 1 20); do \
-	  pairs=$$(curl -sS -X POST http://localhost:8080/graphql -H 'Content-Type: application/json' \
-	    -d '{"query":"{ attackPaths{ id score } }"}' | jq -r '.data.attackPaths[] | "\(.id)\t\(.score)"'); \
-	  if [ -n "$$pairs" ]; then break; fi; \
+	  rows=$$(curl -sS -X POST http://localhost:8080/graphql -H 'Content-Type: application/json' \
+	    -d '{"query":"{ attackPaths{ id score runtimeConfirmed } }"}' | jq -r '.data.attackPaths[] | "\(.id)\t\(.score)\t\(.runtimeConfirmed)"'); \
+	  if [ -n "$$rows" ]; then break; fi; \
 	  echo "  waiting for the analyzer to surface attack paths…"; sleep 3; \
-	done; \
-	if [ -z "$$pairs" ]; then echo "  ✗ no attack paths yet - run 'make seed' (and give the analyzer a cycle) first"; exit 1; fi; \
-	printf '%s\n' "$$pairs" | while IFS="$$(printf '\t')" read -r id score; do \
+	 done; \
+	if [ -z "$$rows" ]; then echo "  ✗ no attack paths yet - run 'make seed' (and give the analyzer a cycle) first"; exit 1; fi; \
+	printf '%s\n' "$$rows" | while IFS="$$(printf '\t')" read -r id score live; do \
 	  [ -z "$$id" ] && continue; \
-	  outcome=$$(awk -v s="$$score" 'BEGIN{print (s>=0.5)?"confirmed":"refuted"}'); \
+	  pick=$$(printf '%s' "t:$$id" | cksum | cut -d' ' -f1); \
+	  draw=$$(printf '%s' "o:$$id" | cksum | cut -d' ' -f1); \
+	  if [ "$$live" != "true" ] && [ $$((pick % 100)) -ge 40 ]; then continue; fi; \
+	  outcome=$$(awk -v s="$$score" -v u="$$((draw % 100))" 'BEGIN{print (u < int(s*100+0.5))?"confirmed":"refuted"}'); \
 	  body="{\"pathId\":\"$$id\",\"outcome\":\"$$outcome\",\"source\":\"caldera-bas\",\"evidence\":\"atomic test run\""; \
-	  if [ "$$outcome" = "confirmed" ]; then \
-	    det=$$(awk -v s="$$score" 'BEGIN{print (s>=0.88)?"true":"false"}'); \
-	    body="$$body,\"detected\":$$det"; \
-	  fi; \
+	  if [ "$$outcome" = "confirmed" ]; then body="$$body,\"detected\":$$live"; fi; \
 	  curl -sS -X POST http://localhost:8080/validations -H 'Content-Type: application/json' -d "$$body}" >/dev/null; \
 	done; \
 	curl -sS -X POST http://localhost:8080/validations -H 'Content-Type: application/json' \
 	  -d '{"outcome":"missed","source":"red-team","route":"Okta → SaaS → data export (engine missed it)"}' >/dev/null; \
-	echo "  done - Overview ‘Calibration’ panel now shows segments, detection and a diagnosis:"; \
+	echo "  done - the Accuracy view now shows the verdict, the evidence and a diagnosis (verdicts from an"; \
+	echo "  earlier run stay recorded: start from an empty VALIDATIONS_PATH to see only these):"; \
 	curl -sS http://localhost:8080/validations | jq -c '.calibration | {samples,brier,brier_recalibrated,verdict,diagnosis}'
 
 ## seed-load: generate a large synthetic graph and POST it to ingest (scale demo)
@@ -236,7 +293,7 @@ import-verdicts:
 validate-harness:
 	@bash scripts/validate-harness.sh
 
-## chart-install: install the Helm chart on a throwaway kind cluster with the DEFAULT values and wait for every pod to be Ready, then check that Apache AGE is loadable inside it. `helm lint` and `helm template` cannot catch an image whose USER is root under runAsNonRoot - that combination made `helm install` impossible while CI stayed green. NODE_IMAGE=<kindest/node:vX> tests another Kubernetes version; KEEP=1 leaves the cluster up. Needs kind + kubectl + helm.
+## chart-install: install the Helm chart on a throwaway kind cluster with the DEFAULT values and wait for every pod to be Ready, then check that Apache AGE is loadable inside it. `helm lint` and `helm template` cannot catch an image whose USER is root under runAsNonRoot - that combination made `helm install` impossible while CI stayed green. NODE_IMAGE=<kindest/node:vX> tests another Kubernetes version; DATABASE=cloudnativepg installs the CloudNativePG operator, runs the database under it and fails over the primary to check a write still lands; KEEP=1 leaves the cluster up. Needs kind + kubectl + helm.
 chart-install:
 	@bash scripts/chart-install.sh
 

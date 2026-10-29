@@ -9,8 +9,12 @@
 #
 # SECRETS: this file holds NO secrets. It points `secrets.existingSecret` at a
 # Secret you manage (External Secrets / Sealed Secrets / Vault) carrying the keys
-# listed below. To let the chart create the Secret instead, set
-# `secrets.existingSecret: ""` and pass each value with --set (never commit them).
+# listed below - the way that works under Argo CD and Flux too. To let the chart create
+# the Secret instead, set `secrets.existingSecret: ""` and either pass each value with
+# --set (never commit them), or add `secrets.generate: true` and the chart generates every
+# one left empty, keeping them across `helm upgrade` - all but the database's password,
+# which only the database knows (postgres.auth.password; under postgres.cloudnativepg the
+# operator generates it).
 
 backend:
   # Refuse to start unless both the API and ingest are authenticated.
@@ -43,7 +47,10 @@ backend:
   waitImage: busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
 
 # Bring your own managed, encrypted Postgres with the Apache AGE extension (the
-# bundled demo image has no TLS, so it cannot satisfy sslMode: verify-full).
+# bundled demo image has no TLS, so it cannot satisfy sslMode: verify-full) - or, where no
+# managed service offers AGE (AWS, GCP), add --set postgres.cloudnativepg.enabled=true and
+# the CloudNativePG operator runs it in the cluster, replicated and with verified TLS;
+# externalHost and the password below are then not used (docs/manual/kubernetes.md).
 postgres:
   enabled: false
   externalHost: db.internal # REQUIRED: change to your managed instance
@@ -111,6 +118,17 @@ persistence:
 # Drop assets that left the source feeds so they stop producing phantom paths.
 graph:
   ttl: "168h" # 7 days
+
+# Only the backend may reach the bundled NATS (and a bundled Postgres). Name the ingress
+# controller's namespace in backendFrom to close the backend to the rest of the cluster
+# too - it authenticates its callers either way. The bundled NATS requires a password
+# the chart generates; rendering with `helm template` (Argo CD, Flux), bring your own
+# instead: nats.auth.existingSecret, a Secret with key NATS_PASSWORD.
+networkPolicy:
+  enabled: true
+  backendFrom: []
+  #  - namespaceSelector:
+  #      matchLabels: { kubernetes.io/metadata.name: ingress-nginx }
 
 # Serve HTTPS at the ingress (recommended). cert-manager issues + fills the cert.
 ingress:

@@ -7,16 +7,20 @@ import (
 	"time"
 
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/apigateway"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/build"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/cloudnet"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/custodian"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/dataclass"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/eks"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/falco"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/iam"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/k8s"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/lambda"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/semgrep"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/sso"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/supplychain"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/terraform"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/trivy"
 )
 
@@ -83,13 +87,17 @@ func TestCollectorsSurviveHostileInput(t *testing.T) {
 		"cloudnet":    cloudnet.New(),
 		"custodian":   custodian.New(),
 		"dataclass":   dataclass.New(),
+		"eks":         eks.New(),
 		"falco":       falco.New(),
 		"iam":         iam.New(),
 		"k8s":         k8s.New(),
+		"lambda":      lambda.New(),
+		"apigateway":  apigateway.New(),
 		"semgrep":     semgrep.New(),
 		"sso":         sso.New(),
 		"supplychain": supplychain.New(),
 		"trivy":       trivy.New(),
+		"terraform":   terraform.New(),
 	}
 
 	for pname, p := range parsers {

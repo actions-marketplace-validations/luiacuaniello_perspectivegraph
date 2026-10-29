@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import AttackPathDetail from "./AttackPathDetail";
 import type { AttackPath } from "../api/client";
@@ -30,8 +30,9 @@ const path = (over: Partial<AttackPath>): AttackPath => ({ ...base, ...over });
 describe("AttackPathDetail probability display", () => {
   it("shows the exploit probability as a whole percentage, labelled", () => {
     render(<AttackPathDetail path={path({ score: 0.5 })} />);
-    expect(screen.getByText("50%")).toBeInTheDocument();
-    expect(screen.getByText(/Exploit probability/)).toBeInTheDocument();
+    const header = screen.getByRole("banner");
+    expect(within(header).getByText("50%")).toBeInTheDocument();
+    expect(within(header).getByText(/Exploit probability/)).toBeInTheDocument();
   });
 
   it("leads with priority when there is one, and names both numbers", () => {
@@ -132,9 +133,33 @@ describe("AttackPathDetail probability display", () => {
     expect(screen.queryByText(/blended/)).not.toBeInTheDocument();
   });
 
-  it("flags a runtime-confirmed path as actively exploited", () => {
+  it("flags a runtime-confirmed path by what was observed: an alert", () => {
+    // "ACTIVELY EXPLOITED" claimed more than a runtime alert shows - the alert may be the
+    // team's own test - and the Today page then had to walk the claim back.
     render(<AttackPathDetail path={path({ runtimeConfirmed: true })} />);
-    expect(screen.getByText("ACTIVELY EXPLOITED")).toBeInTheDocument();
+    expect(screen.getByText("Runtime alert on this route")).toBeInTheDocument();
+    expect(screen.queryByText(/ACTIVELY EXPLOITED/)).not.toBeInTheDocument();
+  });
+
+  it("says when the evidence conflicts instead of showing both claims side by side", () => {
+    render(
+      <AttackPathDetail
+        path={path({ runtimeConfirmed: true, validation: { outcome: "refuted", source: "caldera" } })}
+      />,
+    );
+    expect(screen.getByText("Evidence conflicts")).toBeInTheDocument();
+    expect(screen.getByText(/Refuted by/)).toBeInTheDocument();
+  });
+
+  it("reads a refuted test on an asset open to anyone as a conflict too", () => {
+    // The engine keeps such a path in P1; the header must not show a plain refutation
+    // beside a P1 it cannot explain.
+    render(
+      <AttackPathDetail
+        path={path({ runtimeConfirmed: false, directAccess: true, validation: { outcome: "refuted", source: "caldera" } })}
+      />,
+    );
+    expect(screen.getByText("Evidence conflicts")).toBeInTheDocument();
   });
 });
 
@@ -222,5 +247,140 @@ describe("AttackPathDetail account display", () => {
     render(<AttackPathDetail path={base} />);
     expect(screen.queryByText(/crosses/)).not.toBeInTheDocument();
     expect(screen.queryByText(/^\d{12}$/)).not.toBeInTheDocument();
+  });
+});
+
+// The page reads as an explanation, not a dump of the ontology: one sentence for the
+// route, a reason for the band, verbs between assets, and the place the fix cuts.
+describe("AttackPathDetail in plain language", () => {
+  const log4shell = path({
+    score: 0.55,
+    priority: 70,
+    priorityLabel: "P1",
+    priorityReason: "a runtime alert fired on this route: it is happening, not predicted",
+    nodes: [
+      { id: "lb", label: "LoadBalancer", name: "edge-alb", internetExposed: true, crownJewel: false, runtimeAlert: false },
+      { id: "lib", label: "Library", name: "log4j-core@2.14.1", internetExposed: false, crownJewel: false, runtimeAlert: false },
+      { id: "cve", label: "CVE", name: "CVE-2021-44228", internetExposed: false, crownJewel: false, runtimeAlert: false },
+      { id: "role", label: "IAM_Role", name: "payments-admin", internetExposed: false, crownJewel: true, runtimeAlert: false },
+    ],
+    steps: [
+      { edgeType: "EXPOSES", from: "lb", to: "lib", probability: 0.9 },
+      { edgeType: "AFFECTS", from: "lib", to: "cve", probability: 0.9 },
+      { edgeType: "EXPLOITS", from: "cve", to: "role", probability: 0.8 },
+    ],
+    remediations: [
+      {
+        title: "Deny ingress", kind: "k8s-networkpolicy", filename: "np.yaml", rationale: "cuts the entry",
+        content: "a", cut: { from: "lb", to: "lib", type: "EXPOSES" },
+      },
+    ],
+  });
+
+  it("sums the route up in one sentence", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(
+      screen.getByText(
+        "From the internet, through edge-alb, an attacker reaches payments-admin in 3 steps, by exploiting CVE-2021-44228.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("says why the path is in its band", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(screen.getByText(/Why P1:/)).toBeInTheDocument();
+    expect(screen.getByText(/a runtime alert fired on this route/)).toBeInTheDocument();
+  });
+
+  it("reads the hops as verbs with percentages, not edge types and decimals", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(screen.getByText("exposes")).toBeInTheDocument();
+    expect(screen.getByText("is vulnerable to")).toBeInTheDocument();
+    expect(screen.getByText("80%")).toBeInTheDocument();
+    expect(screen.queryByText("EXPOSES")).not.toBeInTheDocument();
+    expect(screen.queryByText(/p = 0\./)).not.toBeInTheDocument();
+    expect(screen.getByText("IAM role")).toBeInTheDocument();
+    // The jump from a CVE to a cloud role is the one a reader would not take on faith.
+    expect(screen.getByText(/act with payments-admin's credentials/)).toBeInTheDocument();
+  });
+
+  it("marks the hop the generated fix cuts", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(screen.getByText("the fix cuts here")).toBeInTheDocument();
+  });
+
+  it("makes applying the fix the primary action when there is one", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(screen.getByRole("button", { name: /Open fix PR/ }).className).toMatch(/bg-accent/);
+  });
+
+  it("keeps fix, detection and evidence in tabs, and switches between them", () => {
+    render(<AttackPathDetail path={log4shell} />);
+    expect(screen.getByRole("tab", { name: /Fix/ })).toHaveAttribute("aria-selected", "true");
+    const tab = screen.getByRole("tab", { name: /Evidence/ });
+    const evidence = document.getElementById(tab.getAttribute("aria-controls")!)!;
+    expect(evidence).not.toBeVisible();
+    fireEvent.click(tab);
+    expect(evidence).toBeVisible();
+    expect(tab).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("holds only tabs in its tablist, and moves between them with the arrow keys", () => {
+    // The graph button sat inside the tablist, which axe fails as aria-required-children.
+    render(<AttackPathDetail path={log4shell} onShowInGraph={() => {}} />);
+    const list = screen.getByRole("tablist", { name: "Path details" });
+    expect([...list.children].every((c) => c.getAttribute("role") === "tab")).toBe(true);
+    expect(within(list).queryByRole("button", { name: /Show in graph/ })).toBeNull();
+
+    const fix = within(list).getByRole("tab", { name: /Fix/ });
+    const tabs = within(list).getAllByRole("tab");
+    expect(tabs.map((t) => t.tabIndex)).toEqual([0, -1, -1]);
+    fix.focus();
+    fireEvent.keyDown(fix, { key: "ArrowLeft" }); // wraps to the last tab
+    const evidence = within(list).getByRole("tab", { name: /Evidence/ });
+    expect(evidence).toHaveAttribute("aria-selected", "true");
+    expect(evidence).toHaveFocus();
+    fireEvent.keyDown(evidence, { key: "Home" });
+    expect(fix).toHaveAttribute("aria-selected", "true");
+    expect(fix).toHaveFocus();
+  });
+
+  it("collapses a long generated file behind 'Show all'", () => {
+    const long = Array.from({ length: 40 }, (_, i) => `line ${i}`).join("\n");
+    render(
+      <AttackPathDetail
+        path={path({ remediations: [{ title: "t", kind: "terraform", filename: "f.tf", rationale: "r", content: long }] })}
+      />,
+    );
+    expect(screen.queryByText(/line 39/)).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Show all 40 lines" }));
+    expect(screen.getByText(/line 39/)).toBeInTheDocument();
+  });
+});
+
+// Which ports the internet reaches is the first question about an exposed machine, and a
+// shell or a database answering it is a finding of its own.
+describe("AttackPathDetail exposure by port", () => {
+  const route = (exposedPorts: string | null, exposedManagementPorts: string | null) =>
+    path({
+      nodes: [
+        { id: "vm", label: "VirtualMachine", name: "bastion", internetExposed: true, exposedPorts, exposedManagementPorts,
+          crownJewel: false, runtimeAlert: false },
+        { id: "role", label: "IAM_Role", name: "admin-role", internetExposed: false, crownJewel: true, runtimeAlert: false },
+      ],
+      steps: [{ edgeType: "ASSUMES", from: "vm", to: "role", probability: 0.9 }],
+    });
+
+  it("names the ports the internet reaches", () => {
+    render(<AttackPathDetail path={route("tcp/22, tcp/443", "tcp/22")} />);
+    expect(screen.getByText("internet-exposed · tcp/22, tcp/443")).toBeInTheDocument();
+    expect(screen.getByText("management port open · tcp/22")).toBeInTheDocument();
+  });
+
+  it("keeps a long port list in the tooltip, and says nothing of management ports that are not open", () => {
+    render(<AttackPathDetail path={route("tcp/0-21, tcp/23-65535, udp/all", null)} />);
+    const badge = screen.getByText("internet-exposed");
+    expect(badge.closest("[title]")?.getAttribute("title")).toContain("tcp/0-21, tcp/23-65535, udp/all");
+    expect(screen.queryByText(/management port open/)).not.toBeInTheDocument();
   });
 });

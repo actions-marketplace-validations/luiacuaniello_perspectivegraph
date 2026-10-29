@@ -107,7 +107,7 @@ class, and `Partial` verdicts are excluded because half credit is not a class.
 Three things the number does not say. A modest Priority AUC is partly by design: Priority
 weighs target sensitivity and blast radius on purpose, so a refuted path to a crown jewel
 ranking high is the order doing its job, not failing at it. The synthetic self-test
-(`make seed-validation`) shows the separation cleanly - its `overconfident` scenario is
+(`make calibration-selftest`) shows the separation cleanly - its `overconfident` scenario is
 badly miscalibrated and orders paths *better* than any other, while `low-resolution`
 cannot be told apart from a coin - but those verdicts are generated, and prove the
 instrument rather than the engine. And the gate diagnosis takes its claims about order
@@ -137,9 +137,10 @@ quantity behind it is named - which is the next section.
 A probability with no trial behind it is not a frequency, so the quantity has to be
 stated. Each hop carries `p(e)`, an exploit probability whose provenance is recorded
 (`kev | epss | runtime | cvss | severity | heuristic`). An attacker profile `c` shifts it
-by capability, scaled by how much that hop depends on skill at all:
+by capability, scaled by how much that hop depends on skill at all, around an anchor δ(e)
+chosen so that the profiles, averaged, give back `p(e)` itself (Σ_c P(c)·p(e|c) = p(e)):
 
-    p(e|c) = sigmoid( logit p(e) + skill(c)·sensitivity(basis(e)) )
+    p(e|c) = sigmoid( logit p(e) + δ(e) + skill(c)·sensitivity(basis(e)) )
     S_c(P) = ∏ p(e|c)
     S(P)   = Σ_c P(c)·S_c(P)
 

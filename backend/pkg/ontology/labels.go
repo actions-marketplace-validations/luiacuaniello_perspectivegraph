@@ -9,11 +9,13 @@ type Label string
 const (
 	// Infrastructure
 	LabelVirtualMachine Label = "VirtualMachine"
+	LabelFunction       Label = "Function" // serverless code with an identity (Lambda)
 	LabelContainer      Label = "Container"
 	LabelVPC            Label = "VPC"
 	LabelLoadBalancer   Label = "LoadBalancer"
 	LabelDatabase       Label = "Database" // managed DB (RDS, Cloud SQL…), often a crown jewel
 	LabelBucket         Label = "Bucket"   // object storage (S3, GCS…), often a crown jewel
+	LabelAPI            Label = "API"      // an HTTP front door to code (API Gateway)
 
 	// Code / App
 	LabelRepository Label = "Repository"
@@ -77,8 +79,8 @@ const (
 // first - a defense-in-depth allowlist so a future bug that lets external data
 // reach a label/edge type can never become Cypher injection.
 var validLabels = map[Label]bool{
-	LabelVirtualMachine: true, LabelContainer: true, LabelVPC: true,
-	LabelLoadBalancer: true, LabelDatabase: true, LabelBucket: true,
+	LabelVirtualMachine: true, LabelContainer: true, LabelFunction: true, LabelVPC: true,
+	LabelLoadBalancer: true, LabelDatabase: true, LabelBucket: true, LabelAPI: true,
 	LabelRepository: true, LabelImage: true, LabelPackage: true, LabelLibrary: true,
 	LabelUser: true, LabelIAMRole: true, LabelServiceAccount: true, LabelIdentityProvider: true,
 	LabelCVE: true, LabelWeakness: true, LabelMisconfiguration: true, LabelSecret: true,
@@ -139,13 +141,37 @@ func Truncate(s string) string {
 // Well-known node property keys that drive analysis. Keeping them as constants
 // avoids stringly-typed bugs across collectors and the analyzer.
 const (
-	// PropInternetExposed (bool) marks a node as a valid traversal *seed*.
+	// PropInternetExposed (bool) marks a node as a valid traversal *seed*. Read it through
+	// Node.InternetExposed, which lets a network evaluation decide (PropNetworkExposed).
 	PropInternetExposed = "internet_exposed"
+	// PropNetworkExposed (bool) is the network source's verdict on whether the internet
+	// reaches an asset, from its security groups, address, routes and ACLs - written
+	// true or false, every time it describes the asset. Where present it decides: a
+	// source that only saw a public address must not outlive that verdict, nor flip it
+	// back depending on which of the two arrived last. Properties accumulate across
+	// ingests, so a verdict written only when true could never be retracted.
+	PropNetworkExposed = "network_exposed"
 	// PropCredentialExposed (bool) marks a node as a traversal seed under the
 	// credential-origin threat model: an identity whose long-lived credentials could
 	// leak (phishing, keys in code). Distinct from internet_exposed so the two origins
 	// stay separable; only seeded when the operator opts in (SEED_IAM_USERS).
 	PropCredentialExposed = "credential_exposed" // #nosec G101 -- ontology property label, not a credential (name matches gosec's "cred" heuristic)
+	// PropPublicAccess (bool) marks a node anyone may use without credentials: a bucket
+	// whose ACL or policy grants public read, a role whose trust policy admits any
+	// principal. Stronger than internet_exposed, which says only that the node can be
+	// reached: an internet-facing database still wants a password, a public bucket does
+	// not. A crown jewel carrying it is compromised as it stands - see Node.HeldByAttacker.
+	PropPublicAccess = "public_access"
+	// PropExposure (string) says in words how the internet reaches a node, or why it does
+	// not, beside the verdict in PropNetworkExposed. Written by the feeds that decide it
+	// from a resource's own settings: Lambda functions and API Gateway APIs.
+	PropExposure = "exposure"
+	// ExposureFunctionURL and ExposureFunctionPolicy are the two ways the lambda collector
+	// finds a function open to anyone. The remediation package picks its fix by them, so
+	// both read them from here: a wording changed on one side only would quietly turn the
+	// fix for that way into the generic one that names both.
+	ExposureFunctionURL    = "function URL without authentication"
+	ExposureFunctionPolicy = "function policy lets any AWS principal invoke it"
 	// PropCrownJewel (bool) marks a node as a valid traversal *target*.
 	PropCrownJewel = "crown_jewel"
 	// PropCrownJewelBasis (string) records WHY a node is a crown jewel - "tagged"
@@ -247,10 +273,10 @@ const (
 	PropWeightBasis = "weight_basis"
 
 	// PropEvidenceCount (int) is the number of independent observations behind an
-	// edge's probability (e.g. corroborating KEV/runtime sightings). When present it
-	// sets the Beta posterior's concentration directly (evidence-count-derived
-	// epistemic uncertainty) instead of the basis-confidence heuristic. Absent/0 ⇒
-	// the heuristic κ. A collector that tracks corroboration count should stamp it.
+	// edge's probability (e.g. corroborating KEV/runtime sightings). Each one adds to
+	// the concentration the weight basis gives the Beta posterior (κ = κ(basis) +
+	// count), so evidence only ever tightens it. Absent/0 ⇒ the basis alone. A
+	// collector that tracks corroboration count should stamp it.
 	PropEvidenceCount = "evidence_count"
 
 	// PropWeightCause (string) identifies the SHARED cause driving an edge's
@@ -260,7 +286,9 @@ const (
 	// risk Monte Carlo couples them with one draw per cause (P(all) = min p, the
 	// Fréchet bound), instead of the independent sampling that overstates redundancy
 	// across paths that all rest on the same weakness. Absent ⇒ the edge is its own
-	// independent cause. A collector should stamp the CVE/credential id when known.
+	// independent cause - except an AFFECTS edge into a CVE, whose cause the analyzer
+	// takes to be that CVE (analyzer.weightCauseOf). A feed that knows any other shared
+	// cause - a leaked credential, a misconfiguration - stamps it, and a stamped cause wins.
 	PropWeightCause = "weight_cause"
 )
 

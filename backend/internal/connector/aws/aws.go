@@ -16,8 +16,11 @@ import (
 	"fmt"
 
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/apigateway"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/cloudnet"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/eks"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/iam"
+	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/lambda"
 	"github.com/luiacuaniello/perspectivegraph/pkg/ontology"
 )
 
@@ -30,6 +33,14 @@ const (
 	FeedNetwork Feed = "cloudnet"
 	// FeedIAM is iam get-account-authorization-details.
 	FeedIAM Feed = "iam"
+	// FeedEKS is each EKS cluster's Pod Identity associations and access entries: the
+	// ways between a cluster and the account that the cluster's own objects do not show.
+	FeedEKS Feed = "eks"
+	// FeedLambda is each Lambda function with its URL, resource policy and tags.
+	FeedLambda Feed = "lambda"
+	// FeedAPIGateway is each REST, HTTP and WebSocket API with its stages, its routes'
+	// authorization and what they integrate with.
+	FeedAPIGateway Feed = "apigateway"
 )
 
 // transport acquires the raw describe-* JSON the existing collectors parse.
@@ -52,6 +63,8 @@ type transport interface {
 type Connector struct {
 	t     transport
 	feeds []feedBinding
+	// tap, when set, is handed each feed's raw JSON once it has parsed (Config.Tap).
+	tap func(feed Feed, account string, raw []byte)
 }
 
 type feedBinding struct {
@@ -68,6 +81,9 @@ func New(t transport) *Connector {
 		feeds: []feedBinding{
 			{FeedNetwork, cloudnet.New()},
 			{FeedIAM, iam.New()},
+			{FeedEKS, eks.New()},
+			{FeedLambda, lambda.New()},
+			{FeedAPIGateway, apigateway.New()},
 		},
 	}
 }
@@ -101,7 +117,49 @@ func (c *Connector) Collect(ctx context.Context) ([]ontology.Event, error) {
 			errs = append(errs, fmt.Errorf("parse %s: %w", b.feed, err))
 			continue
 		}
+		if c.tap != nil {
+			c.tap(b.feed, account, raw)
+		}
+		if scope := c.snapshotScope(b.feed, account); scope != "" {
+			for i := range evs {
+				evs[i].Snapshot = &ontology.Snapshot{Scope: scope}
+			}
+		}
 		out = append(out, evs...)
 	}
 	return out, errors.Join(errs...)
+}
+
+// snapshotScope is what a feed pulled in full describes completely, so that an asset it
+// no longer lists - an instance terminated, a role deleted, a security group rule
+// revoked - can be retracted: IAM is one account, the network feed one account in one
+// region. Only a feed that was fetched and parsed without error gets here, and only when
+// it is known which account it read: two accounts that cannot be told apart would
+// retract each other's assets, so an unknown account (fixtures, a failed STS call) pulls
+// as a partial observation.
+func (c *Connector) snapshotScope(feed Feed, account string) string {
+	if account == "" {
+		return ""
+	}
+	switch feed {
+	case FeedIAM:
+		return "aws:" + account
+	case FeedNetwork, FeedEKS, FeedLambda, FeedAPIGateway:
+		r, ok := c.t.(interface{ Region() string })
+		if !ok || r.Region() == "" {
+			return ""
+		}
+		// EKS clusters and Lambda functions are regional: a deleted association, access
+		// entry or function is retracted with the next pull of its region.
+		switch feed {
+		case FeedEKS:
+			return "aws:" + account + "/" + r.Region() + "/eks"
+		case FeedLambda:
+			return "aws:" + account + "/" + r.Region() + "/lambda"
+		case FeedAPIGateway:
+			return "aws:" + account + "/" + r.Region() + "/apigateway"
+		}
+		return "aws:" + account + "/" + r.Region()
+	}
+	return ""
 }

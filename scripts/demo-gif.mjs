@@ -67,11 +67,14 @@ const SCENES = [
   { act: "", hold: 22, label: "Today" },
   { act: nav("Attack paths"), hold: 16, label: "the ranked routes" },
   {
-    // Open the top route's detail and scroll its kill chain into view.
+    // Open the top route's detail and scroll its kill chain into view. Found by its
+    // data-route-id, and a list with no route THROWS: this looked for a CSS class, and a
+    // list restructured under it would have captured the unselected page without a word.
     act: `
       (() => {
-        const rows = document.querySelectorAll(".group\\\\/row button");
-        rows[0]?.click();
+        const route = document.querySelector("[data-route-id]");
+        if (!route) throw new Error("no route in the attack path list");
+        route.click();
       })();
     `,
     hold: 20,
@@ -83,20 +86,24 @@ const SCENES = [
     // silently showed more kill chain instead of the fix the caption promises.
     act: `
       (() => {
-        // Scroll to the fix BY NAME rather than by guessing a container. Picking "the
+        // Open the Fix tab BY NAME rather than by guessing a container. Picking "the
         // first scrollable div" found the route list on the left and quietly scrolled
         // that instead, so the scene showed more rows where the caption promises a
-        // Terraform fix. scrollIntoView finds the right ancestor on its own.
-        const h = [...document.querySelectorAll("*")].find(
-          e => e.children.length === 0 && /Suggested remediation/i.test(e.textContent || "")
+        // Terraform fix. scrollIntoView finds the right ancestor on its own. A missing
+        // tab THROWS: this looked for a "Suggested remediation" heading, and when the
+        // detail moved the fix into a tab, the scene went on capturing the header.
+        const tab = [...document.querySelectorAll('[role="tablist"][aria-label="Path details"] [role="tab"]')].find(
+          (t) => (t.textContent || "").startsWith("Fix")
         );
-        h?.scrollIntoView({ behavior: "smooth", block: "center" });
+        if (!tab) throw new Error("no Fix tab in the path detail");
+        tab.click();
+        tab.scrollIntoView({ behavior: "smooth", block: "start" });
       })();
     `,
     hold: 18,
     label: "the generated fix",
   },
-  { act: nav("Trust"), hold: 24, label: "whether to trust it" },
+  { act: nav("Accuracy"), hold: 24, label: "whether to trust it" },
 ];
 
 const FRAME_MS = 120; // matches the previous GIF's cadence

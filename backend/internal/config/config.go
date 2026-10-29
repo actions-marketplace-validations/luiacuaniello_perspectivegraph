@@ -26,6 +26,11 @@ type Config struct {
 	NATSTLSCAFile   string
 	NATSTLSCertFile string
 	NATSTLSKeyFile  string
+	// NATSUser and NATSPassword authenticate to a NATS that requires it (the chart's
+	// bundled server does). Empty user sends no credentials. The password is a secret:
+	// NATS_PASSWORD_FILE works too.
+	NATSUser     string
+	NATSPassword string
 	// NATSMaxAge is how long an event may wait unprocessed in the stream, and how long
 	// a dead-lettered one is kept (NATS_MAX_AGE, default 168h). Processed events are
 	// removed as soon as they are acked, so this bounds a backlog, not the history.
@@ -116,6 +121,13 @@ type Config struct {
 	// required for any real write: empty means every write is refused.
 	RepoAllowlist []string
 
+	// PRAttribution is which critical paths the engine's own pull-request feedback - the
+	// commit status and the PR/MR comments - counts against a commit: "diff" (the
+	// default) the routes the change opened or made likelier, the merge gate's rule (see
+	// impact.Ledger); "commit" every route through an asset stamped with it, the rule
+	// before 1.22.
+	PRAttribution string
+
 	// GitLab MR commenter (action layer)
 	GitLabToken  string
 	GitLabAPIURL string
@@ -146,8 +158,9 @@ type Config struct {
 	// Auth (optional; open with a warning when unset)
 	IngestHMACSecret  string // HMAC secret for the default tenant
 	IngestHMACSecrets string // per-tenant secrets: "tenant:secret,tenant2:secret2"
-	// IngestHMACAcceptV1 keeps accepting v1 signatures, which cover the body only
-	// (INGEST_HMAC_ACCEPT_V1, default true). Turn it off once every sender signs v2.
+	// IngestHMACAcceptV1 accepts v1 signatures, which cover the body only
+	// (INGEST_HMAC_ACCEPT_V1, default false). Turn it on only for a sender that cannot
+	// sign v2 yet: a v1 request can be replayed, and moved to another commit.
 	IngestHMACAcceptV1 bool
 	APITokens          string // bearer tokens → role[:tenant]: "tok:viewer,tok2:admin:globex"
 
@@ -247,6 +260,13 @@ type Config struct {
 	// phantom attack paths. 0 (default) disables pruning.
 	GraphTTL time.Duration
 
+	// GraphSweep applies complete snapshots: when a source that described a scope in full
+	// (one scanned image, one AWS account and region, a cluster posted with
+	// ?snapshot=) no longer lists something it did, that assertion is withdrawn, and an
+	// element nobody asserts any more leaves the graph. On by default; false keeps every
+	// element until GRAPH_TTL, as before 1.23.
+	GraphSweep bool
+
 	// ScrubIngest redacts secret-looking values (AWS/GitHub/Slack tokens, private
 	// keys, `secret=…` assignments) out of scanner output before it is stored, so
 	// the attack map never persists a live credential. On by default - disable only
@@ -284,6 +304,17 @@ type Config struct {
 	// fixtures mode.
 	AzureConnectorMode string
 	AzureFixturesDir   string
+
+	// Kubernetes connector. K8SConnectorMode is "incluster" (default - the cluster the
+	// backend runs in, read with its service account) or "fixtures" (a kubectl dump on
+	// disk). K8SClusterName names the cluster, and is required: names repeat across
+	// clusters, and on EKS the name is how its objects meet the AWS account's.
+	// K8SAWSAccount is the AWS account its nodes run in, on EKS, so a pod's escape to its
+	// node meets the instance the AWS connector read.
+	K8SConnectorMode string
+	K8SClusterName   string
+	K8SAWSAccount    string
+	K8SFixturesDir   string
 
 	// CORS: browser origins allowed to call the API cross-origin. Defaults to the
 	// local Vite dev server + the docker-compose dashboard. Set to "*" to allow any
@@ -356,6 +387,8 @@ func Load() Config {
 		NATSTLSCAFile:   getenv("NATS_TLS_CA", ""),
 		NATSTLSCertFile: getenv("NATS_TLS_CERT", ""),
 		NATSTLSKeyFile:  getenv("NATS_TLS_KEY", ""),
+		NATSUser:        getenv("NATS_USER", ""),
+		NATSPassword:    sec.get("NATS_PASSWORD", ""),
 		NATSMaxAge:      getdur("NATS_MAX_AGE", 7*24*time.Hour),
 
 		Env:         getenv("PG_ENV", "demo"),
@@ -388,6 +421,7 @@ func Load() Config {
 		GitHubDryRun: getbool("GITHUB_DRY_RUN", false),
 
 		RepoAllowlist: getlist("REPO_ALLOWLIST", ""),
+		PRAttribution: getenv("PR_ATTRIBUTION", "diff"),
 
 		GitLabToken:  sec.get("GITLAB_TOKEN", ""),
 		GitLabAPIURL: getenv("GITLAB_API_URL", "https://gitlab.com/api/v4"),
@@ -410,7 +444,7 @@ func Load() Config {
 
 		IngestHMACSecret:   sec.get("INGEST_HMAC_SECRET", ""),
 		IngestHMACSecrets:  sec.get("INGEST_HMAC_SECRETS", ""),
-		IngestHMACAcceptV1: getbool("INGEST_HMAC_ACCEPT_V1", true),
+		IngestHMACAcceptV1: getbool("INGEST_HMAC_ACCEPT_V1", false),
 		APITokens:          sec.get("API_TOKENS", ""),
 
 		OIDCJWKSURL:   getenv("OIDC_JWKS_URL", ""),
@@ -448,6 +482,7 @@ func Load() Config {
 		AIRatePerMin:  getfloat("AI_RATE_PER_MIN", 10),
 		GraphStrict:   getbool("GRAPH_STRICT", false),
 		GraphTTL:      getdur("GRAPH_TTL", 0),
+		GraphSweep:    getbool("GRAPH_SWEEP", true),
 		ScrubIngest:   getbool("SCRUB_INGEST", true),
 
 		ConnectorsEnabled: getlist("CONNECTORS_ENABLED", ""),
@@ -461,6 +496,11 @@ func Load() Config {
 
 		AzureConnectorMode: getenv("AZURE_CONNECTOR_MODE", "fixtures"),
 		AzureFixturesDir:   getenv("AZURE_FIXTURES_DIR", ""),
+
+		K8SConnectorMode: getenv("K8S_CONNECTOR_MODE", "incluster"),
+		K8SClusterName:   getenv("K8S_CLUSTER_NAME", ""),
+		K8SAWSAccount:    getenv("K8S_AWS_ACCOUNT", ""),
+		K8SFixturesDir:   getenv("K8S_FIXTURES_DIR", ""),
 
 		CORSAllowedOrigins:   getlist("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:3000"),
 		TrustedProxyCIDRs:    getlist("TRUSTED_PROXY_CIDRS", ""),

@@ -26,6 +26,8 @@ import (
 
 func TestMemoryStoreContract(t *testing.T) {
 	runStoreContract(t, memory.New())
+	assertSweepContract(t, memory.New())
+	assertAGuessNeverReplacesAFact(t, memory.New())
 }
 
 func TestAGEStoreContract(t *testing.T) {
@@ -89,9 +91,12 @@ func TestAGEStoreContract(t *testing.T) {
 	}
 	defer store.Close()
 
+	assertElementsBeforeProvenanceAreNeverSwept(t, store)
+	assertAGuessNeverReplacesAFact(t, store) // early: it needs an edge type the graph has never seen
 	runStoreContract(t, store)
 	assertPathfinderEquivalence(t, store)
 	assertConcurrentWritersDoNotDuplicate(t, store)
+	assertSweepContract(t, store)
 
 	// A parked edge older than the TTL is dropped by the next write, not landed later.
 	ctx2 := context.Background()
@@ -190,6 +195,10 @@ func assertPathfinderEquivalence(t *testing.T, store graph.Store) {
 		{ID: "pf-c", Label: ontology.LabelContainer, Name: "pf-c"},
 		{ID: "pf-v", Label: ontology.LabelCVE, Name: "pf-cve"},
 		{ID: "pf-j", Label: ontology.LabelIAMRole, Name: "pf-admin", Properties: map[string]any{ontology.PropCrownJewel: true}},
+		// A source claimed it exposed, and the network source found it is not: the network
+		// verdict decides, in the database's path finder as in the in-process one.
+		{ID: "pf-cleared", Label: ontology.LabelVirtualMachine, Name: "pf-cleared", Properties: map[string]any{
+			ontology.PropInternetExposed: true, ontology.PropNetworkExposed: false}},
 	} {
 		must(store.UpsertNode(ctx, n))
 	}
@@ -198,6 +207,7 @@ func assertPathfinderEquivalence(t *testing.T, store graph.Store) {
 		{Type: ontology.EdgeAffects, From: "pf-c", To: "pf-v", ExploitProbability: 0.5},
 		{Type: ontology.EdgeExploits, From: "pf-v", To: "pf-j", ExploitProbability: 0.8},
 		{Type: ontology.EdgeAssumes, From: "pf-c", To: "pf-j", ExploitProbability: 0.2},
+		{Type: ontology.EdgeConnectsTo, From: "pf-cleared", To: "pf-j", ExploitProbability: 0.9},
 	} {
 		must(store.UpsertEdge(ctx, e))
 	}
@@ -225,6 +235,9 @@ func assertPathfinderEquivalence(t *testing.T, store graph.Store) {
 			t.Errorf("path %s score differs: DB %.4f vs Dijkstra %.4f", k, dv, gv)
 		}
 	}
+	if _, ok := db["pf-cleared→pf-j"]; ok {
+		t.Error("the DB pathfinder started from an asset the network source found unexposed")
+	}
 	if got := db["pf-lb→pf-j"]; got < 0.36-1e-9 || got > 0.36+1e-9 {
 		t.Errorf("best path score = %.4f, want 0.36", got)
 	}
@@ -236,6 +249,30 @@ func assertPathfinderEquivalence(t *testing.T, store graph.Store) {
 	bounded := analyzer.CriticalPathsVia(ctx, store, snap, 2, true)
 	if got := score(bounded)["pf-lb→pf-j"]; got < 0.18-1e-9 || got > 0.18+1e-9 {
 		t.Errorf("with maxHops=2 the DB finder should be capped at the 2-hop route (0.18), got %.4f", got)
+	}
+
+	// The two finders start from the same seeds - a leaked identity under the
+	// credential-origin lens as well as the internet - and both list a jewel open to
+	// anyone as its direct-access path. The Cypher query used to match internet-exposed
+	// sources only.
+	must(store.UpsertNode(ctx, ontology.Node{ID: "pf-user", Label: ontology.LabelUser, Name: "pf-user",
+		Properties: map[string]any{ontology.PropCredentialExposed: true}}))
+	must(store.UpsertNode(ctx, ontology.Node{ID: "pf-open", Label: ontology.LabelDatabase, Name: "pf-open",
+		Properties: map[string]any{ontology.PropInternetExposed: true, ontology.PropPublicAccess: true, ontology.PropCrownJewel: true}}))
+	must(store.UpsertEdge(ctx, ontology.Edge{Type: ontology.EdgeAssumes, From: "pf-user", To: "pf-j", ExploitProbability: 0.7}))
+	snap, err = store.Snapshot(ctx)
+	must(err)
+	db, go_ = score(analyzer.CriticalPathsVia(ctx, store, snap, 12, true)), score(analyzer.FindCriticalPaths(snap))
+	for _, k := range []string{"pf-user→pf-j", "pf-open→pf-open"} {
+		if _, ok := go_[k]; !ok {
+			t.Errorf("Dijkstra is missing %s", k)
+		}
+		if _, ok := db[k]; !ok {
+			t.Errorf("DB pathfinder is missing %s, which Dijkstra finds", k)
+		}
+	}
+	if len(db) != len(go_) {
+		t.Errorf("path count differs: DB %d vs Dijkstra %d", len(db), len(go_))
 	}
 }
 

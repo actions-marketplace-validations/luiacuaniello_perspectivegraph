@@ -11,12 +11,14 @@ import (
 	"database/sql"
 	"encoding/pem"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,6 +36,7 @@ import (
 	"github.com/luiacuaniello/perspectivegraph/internal/connector"
 	awsconn "github.com/luiacuaniello/perspectivegraph/internal/connector/aws"
 	azureconn "github.com/luiacuaniello/perspectivegraph/internal/connector/azure"
+	k8sconn "github.com/luiacuaniello/perspectivegraph/internal/connector/kubernetes"
 	"github.com/luiacuaniello/perspectivegraph/internal/coverage"
 	"github.com/luiacuaniello/perspectivegraph/internal/cryptostore"
 	"github.com/luiacuaniello/perspectivegraph/internal/exportsign"
@@ -41,6 +44,7 @@ import (
 	"github.com/luiacuaniello/perspectivegraph/internal/graph/age"
 	"github.com/luiacuaniello/perspectivegraph/internal/graph/memory"
 	"github.com/luiacuaniello/perspectivegraph/internal/history"
+	"github.com/luiacuaniello/perspectivegraph/internal/impact"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion"
 	"github.com/luiacuaniello/perspectivegraph/internal/ingestion/iam"
 	"github.com/luiacuaniello/perspectivegraph/internal/kevholdout"
@@ -61,22 +65,30 @@ import (
 	"github.com/luiacuaniello/perspectivegraph/pkg/ontology"
 )
 
-// subcommands is what the binary answers to, for the "unknown subcommand" message at the
-// bottom of main. A test keeps it in step with the dispatch above it, because a list that
-// silently drifts is worse than no list: it tells someone their spelling was wrong when
-// the command actually exists.
-var subcommands = []string{
-	"andprobe", "awscollect", "gate", "genload", "genverdicts", "healthz",
-	"importverdicts", "ingestreal", "mcp", "redteam", "verify-audit",
-}
-
 func main() {
+	// What someone types first at a binary they have just downloaded. `help <command>` is
+	// that command's -h, so it is rewritten into one and dispatched below with the rest.
+	if len(os.Args) >= 2 && (os.Args[1] == "help" || helpFlag(os.Args[1])) {
+		if os.Args[1] != "help" || len(os.Args) == 2 || os.Args[2] == "help" || os.Args[2] == "version" {
+			printUsage(os.Stdout)
+			return
+		}
+		os.Args = []string{os.Args[0], os.Args[2], "-h"}
+	}
+	if len(os.Args) >= 2 && (os.Args[1] == "version" || versionFlag(os.Args[1])) {
+		fmt.Println(versionLine())
+		return
+	}
+
 	// Operator utility: verify the audit log's hash chain and exit. Dispatching on the
 	// subcommand alone - not on it plus an argument - is deliberate: `verify-audit` with
 	// nothing after it used to fall through every other case and START THE SERVER, so a
 	// typo in a verification step became a running process nobody meant to launch.
 	if len(os.Args) >= 2 && os.Args[1] == "verify-audit" {
 		if err := runVerifyAudit(os.Args[2:], os.Stdout); err != nil {
+			if errors.Is(err, flag.ErrHelp) {
+				return
+			}
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
@@ -88,8 +100,7 @@ func main() {
 	// running stack. See runGenload for flags. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "genload" {
 		if err := runGenload(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "genload:", err)
-			os.Exit(1)
+			fail("genload", err)
 		}
 		return
 	}
@@ -99,8 +110,7 @@ func main() {
 	// development without real vulnerable infra. See runGenverdicts. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "genverdicts" {
 		if err := runGenverdicts(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "genverdicts:", err)
-			os.Exit(1)
+			fail("genverdicts", err)
 		}
 		return
 	}
@@ -128,8 +138,7 @@ func main() {
 	// calibration loop with no custom integration. See runImportVerdicts. Exits done.
 	if len(os.Args) >= 2 && os.Args[1] == "importverdicts" {
 		if err := runImportVerdicts(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "importverdicts:", err)
-			os.Exit(1)
+			fail("importverdicts", err)
 		}
 		return
 	}
@@ -139,8 +148,7 @@ func main() {
 	// on-ramp to calibrating on real data. See runIngestReal. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "ingestreal" {
 		if err := runIngestReal(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "ingestreal:", err)
-			os.Exit(1)
+			fail("ingestreal", err)
 		}
 		return
 	}
@@ -150,8 +158,17 @@ func main() {
 	// counts the AND candidates on critical paths. See runAndProbe. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "andprobe" {
 		if err := runAndProbe(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "andprobe:", err)
-			os.Exit(1)
+			fail("andprobe", err)
+		}
+		return
+	}
+
+	// Send one scanner report to a running engine, signed the way its ingestion endpoint
+	// requires - what a CI job or a cron job calls instead of curl and openssl. See
+	// runIngest. Exits when done.
+	if len(os.Args) >= 2 && os.Args[1] == "ingest" {
+		if err := runIngest(os.Args[2:], os.Stdin, os.Stdout); err != nil {
+			fail("ingest", err)
 		}
 		return
 	}
@@ -162,8 +179,7 @@ func main() {
 	// check. See runAwsCollect. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "awscollect" {
 		if err := runAwsCollect(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "awscollect:", err)
-			os.Exit(1)
+			fail("awscollect", err)
 		}
 		return
 	}
@@ -173,8 +189,7 @@ func main() {
 	// Read-only dry runs; creates nothing. See runRedteam. Exits when done.
 	if len(os.Args) >= 2 && os.Args[1] == "redteam" {
 		if err := runRedteam(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "redteam:", err)
-			os.Exit(1)
+			fail("redteam", err)
 		}
 		return
 	}
@@ -183,8 +198,7 @@ func main() {
 	// stdout is the protocol channel, so this must return before any logging starts.
 	if len(os.Args) >= 2 && os.Args[1] == "mcp" {
 		if err := runMCP(os.Args[2:]); err != nil {
-			fmt.Fprintln(os.Stderr, "mcp:", err)
-			os.Exit(1)
+			fail("mcp", err)
 		}
 		return
 	}
@@ -193,6 +207,12 @@ func main() {
 	// distroless image (no shell, no curl) be probed with `perspectivegraph
 	// healthz` from a Docker HEALTHCHECK / compose healthcheck.
 	if len(os.Args) >= 2 && os.Args[1] == "healthz" {
+		if len(os.Args) > 2 && helpFlag(os.Args[2]) {
+			// It takes no flags, and probing a server because someone asked what it does
+			// would answer a different question.
+			fmt.Println("usage: perspectivegraph healthz - GET /healthz on API_ADDR (over TLS when TLS_CERT_FILE and TLS_KEY_FILE are set); exit 0 on a 200, 1 otherwise")
+			return
+		}
 		if err := healthCheck(); err != nil {
 			fmt.Fprintln(os.Stderr, "healthz:", err)
 			os.Exit(1)
@@ -215,6 +235,11 @@ func main() {
 
 	cfg := config.Load()
 	setupLogging(cfg.LogLevel, cfg.LogFormat)
+	// The first line of every log, and a series on /metrics: which release this is. A
+	// report of a problem either names its version or cannot be answered, and the image
+	// tag is not always in front of whoever is reading the logs.
+	slog.Info("perspectivegraph starting", "version", buildVersion(), "go", runtime.Version())
+	metrics.BuildInfo.WithLabelValues(buildVersion(), runtime.Version()).Set(1)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -267,6 +292,16 @@ func checkProductionConfig(cfg config.Config) error {
 			"dropped as malformed, as naming an unknown role, or as already expired, which would leave the " +
 			"GraphQL endpoint open. Each entry is token:role[:tenant[:YYYY-MM-DD]] and role is viewer or admin, " +
 			"e.g. API_TOKENS=s3cr3t:admin. Check the startup warnings for which entry was rejected")
+	}
+	// A passphrase becomes the store key through a single SHA-256, so whoever holds an
+	// encrypted backup can test guesses at hashing speed. Converting keeps every store
+	// readable, because the SHA-256 of the passphrase IS the key it was encrypting with.
+	if cryptostore.IsPassphrase(cfg.StoreEncryptionKey) {
+		return errors.New("PG_ENV=production but STORE_ENCRYPTION_KEY is a passphrase, which becomes the key " +
+			"through a single SHA-256 - whoever holds an encrypted backup can test guesses at hashing speed. Set " +
+			"a random key of 64 hex characters (openssl rand -hex 32). To keep the stores already encrypted with " +
+			"the passphrase readable, set its SHA-256 instead - the 64 hex characters printf %s \"$PASSPHRASE\" | " +
+			"sha256sum prints: it is the same key, written out")
 	}
 	// Ingest is the write side: an open one lets anyone inject nodes and edges, which
 	// fabricates attack paths that do not exist or buries ones that do.
@@ -331,14 +366,22 @@ func run(parent context.Context, cfg config.Config) error {
 	ctx, fatal := context.WithCancelCause(parent)
 	defer fatal(nil)
 
-	// Validate the deployment profile before touching any dependency.
+	// Validate the deployment profile before touching any dependency. The secret files
+	// first: a file that could not be read is the reason a credential is missing, and
+	// checked later it was hidden behind the consequence - a 600 API_TOKENS_FILE on Linux
+	// stopped the process with "no API credential is configured", which sends the operator
+	// to a credential they did configure.
+	if err := checkSecretConfig(cfg); err != nil {
+		return err
+	}
 	if err := checkProductionConfig(cfg); err != nil {
 		return err
 	}
 	if err := checkAuthConfig(cfg); err != nil {
 		return err
 	}
-	if err := checkSecretConfig(cfg); err != nil {
+	tokens := auth.NewTokenStore(cfg.APITokens)
+	if err := checkTenantNames(cfg, tokens); err != nil {
 		return err
 	}
 
@@ -362,6 +405,8 @@ func run(parent context.Context, cfg config.Config) error {
 			CertFile: cfg.NATSTLSCertFile,
 			KeyFile:  cfg.NATSTLSKeyFile,
 		},
+		User:     cfg.NATSUser,
+		Password: cfg.NATSPassword,
 		MaxAge:   cfg.NATSMaxAge,
 		OnClosed: fatal,
 	})
@@ -380,6 +425,13 @@ func run(parent context.Context, cfg config.Config) error {
 		slog.Info("threat intel: KEV + EPSS enrichment enabled")
 	}
 	normalizer := normalization.New(manager).WithIndexer(indexer).WithThreatIntel(intel).WithScrub(cfg.ScrubIngest)
+	// The merge gate applies a change to a copy of the graph (POST /gate/impact). It goes
+	// through a normalizer configured as this one is - the same threat intel, the same
+	// secret scrubbing - so it lands as the ingest path would land it; only the full-text
+	// index is left out, because nothing of a dry run may leave it.
+	gateNormalizer := func(m *graph.Manager) *normalization.Normalizer {
+		return normalization.New(m).WithThreatIntel(intel).WithScrub(cfg.ScrubIngest)
+	}
 
 	// Where the engine is allowed to write. The forge writers take their destination
 	// from an ingested node property, so without this they write wherever the graph
@@ -393,25 +445,39 @@ func run(parent context.Context, cfg config.Config) error {
 		slog.Warn("forge token set but REPO_ALLOWLIST is empty: every PR comment, commit status and remediation PR will be refused",
 			"fix", "set REPO_ALLOWLIST=owner/repo[,owner/*]")
 	}
+	// Which routes the engine's commit status and PR comments count against a commit: by
+	// default the merge gate's rule - what the change opened or made likelier - which
+	// needs a ledger watching every pass; "commit" is the rule before 1.22.
+	var attribution *impact.Ledger
+	switch cfg.PRAttribution {
+	case "diff":
+		attribution = impact.NewLedger()
+	case "commit":
+	default:
+		return fmt.Errorf("PR_ATTRIBUTION %q is not diff|commit", cfg.PRAttribution)
+	}
 	sinks := action.MultiSink{
 		action.ConsoleSink{},
 		action.NewGitHubCommenter(action.GitHubConfig{
-			Token:   cfg.GitHubToken,
-			BaseURL: cfg.GitHubAPIURL,
-			DryRun:  cfg.GitHubDryRun,
-			Allow:   repoAllow,
+			Token:       cfg.GitHubToken,
+			BaseURL:     cfg.GitHubAPIURL,
+			DryRun:      cfg.GitHubDryRun,
+			Allow:       repoAllow,
+			Attribution: attribution,
 		}),
 		action.NewGitHubChecker(action.GitHubConfig{
-			Token:   cfg.GitHubToken,
-			BaseURL: cfg.GitHubAPIURL,
-			DryRun:  cfg.GitHubDryRun,
-			Allow:   repoAllow,
+			Token:       cfg.GitHubToken,
+			BaseURL:     cfg.GitHubAPIURL,
+			DryRun:      cfg.GitHubDryRun,
+			Allow:       repoAllow,
+			Attribution: attribution,
 		}, cfg.DashboardURL),
 		action.NewGitLabCommenter(action.GitLabConfig{
-			Token:   cfg.GitLabToken,
-			BaseURL: cfg.GitLabAPIURL,
-			DryRun:  cfg.GitLabDryRun,
-			Allow:   repoAllow,
+			Token:       cfg.GitLabToken,
+			BaseURL:     cfg.GitLabAPIURL,
+			DryRun:      cfg.GitLabDryRun,
+			Allow:       repoAllow,
+			Attribution: attribution,
 		}),
 	}
 	notifier := notify.New(cfg.AlertWebhookURL, cfg.AlertWebhookFormat)
@@ -442,6 +508,11 @@ func run(parent context.Context, cfg config.Config) error {
 	}
 	if sealer.Enabled() {
 		slog.Info("at-rest encryption: governance stores + audit log are AES-256-GCM encrypted")
+	}
+	if cryptostore.IsPassphrase(cfg.StoreEncryptionKey) {
+		slog.Warn("STORE_ENCRYPTION_KEY is a passphrase: it becomes the key through a single SHA-256, so an " +
+			"encrypted backup can be attacked at hashing speed. Use 64 hex characters (openssl rand -hex 32); " +
+			"PG_ENV=production refuses a passphrase")
 	}
 
 	// Ed25519 export signing: OSCAL/SIEM exports leave the trust boundary, so a
@@ -527,6 +598,10 @@ func run(parent context.Context, cfg config.Config) error {
 		WithIncremental(cfg.AnalyzerIncremental).
 		WithTTL(cfg.GraphTTL).
 		WithHistory(historyStore)
+	if attribution != nil {
+		// Not passed when nil: a nil *Ledger in the interface would be a non-nil observer.
+		analyzerSvc.WithPassObserver(attribution)
+	}
 	if cfg.GraphTTL > 0 {
 		slog.Info("staleness pruning enabled - assets not re-observed within the TTL are removed (leader only)", "ttl", cfg.GraphTTL)
 	}
@@ -695,20 +770,28 @@ func run(parent context.Context, cfg config.Config) error {
 			"role", r.String(), "writes", "still admin-only (403)")
 	}
 
+	// With more than one tenant configured, an OIDC token has to say which is its own.
+	requireTenant := servesSeveralTenants(cfg, tokens)
+	if requireTenant && cfg.OIDCJWKSURL != "" {
+		slog.Info("OIDC: several tenants are configured, so a token without the tenant claim is refused",
+			"claim", cmp.Or(cfg.OIDCTenantClaim, "tenant"))
+	}
+
 	// The iss/aud fail-closed rule is enforced by checkAuthConfig, before this
 	// function runs and before the process touches any dependency.
 	authn := auth.Chain{
-		auth.NewTokenStore(cfg.APITokens),
+		tokens,
 		auth.NewJWTAuthenticator(auth.JWTConfig{
-			JWKSURL:     cfg.OIDCJWKSURL,
-			Issuer:      cfg.OIDCIssuer,
-			Audience:    cfg.OIDCAudience,
-			RoleClaim:   cfg.OIDCRoleClaim,
-			GroupsClaim: cfg.OIDCGroupsClaim,
-			TenantClaim: cfg.OIDCTenantClaim,
-			AppsClaim:   cfg.OIDCAppsClaim,
-			GroupRoles:  groupRoles,
-			DefaultRole: defaultRole,
+			JWKSURL:       cfg.OIDCJWKSURL,
+			Issuer:        cfg.OIDCIssuer,
+			Audience:      cfg.OIDCAudience,
+			RoleClaim:     cfg.OIDCRoleClaim,
+			GroupsClaim:   cfg.OIDCGroupsClaim,
+			TenantClaim:   cfg.OIDCTenantClaim,
+			AppsClaim:     cfg.OIDCAppsClaim,
+			GroupRoles:    groupRoles,
+			DefaultRole:   defaultRole,
+			RequireTenant: requireTenant,
 		}),
 		// Last: a presented credential is decided by the authenticators above, so a
 		// wrong or expired token fails instead of falling back to anonymous.
@@ -845,7 +928,7 @@ func run(parent context.Context, cfg config.Config) error {
 	// (which reports it), so an empty board can say what it was actually built from.
 	coverageStore := coverage.New().WithStaleAfter(cfg.CoverageStaleAfter)
 
-	ingestSrv := ingestion.NewServer(bus, allCollectors()...).
+	ingestSrv := ingestion.NewServer(bus, ingestCollectors()...).
 		WithHMAC(hmac).WithAudit(auditRec).WithRateLimit(ingestLimiter).
 		WithConnectorStatus(func() any { return connSched.Status() }).
 		WithCoverage(coverageStore)
@@ -859,12 +942,20 @@ func run(parent context.Context, cfg config.Config) error {
 		provider, model := ai.Provider(aiCfg)
 		slog.Info("AI-native layer enabled", "provider", provider, "model", model)
 	}
-	apiHandler, err := buildAPI(manager, analyzerSvc, indexer, authn, auditRec, apiLimiter, suppressStore, historyStore, ticketStore, validationStore, cfg.CORSAllowedOrigins, exportSigner, exfilWatcher, authGuard, authInfoFromConfig(cfg, authn.Enabled()), prOpener, aiClient, aiLimiter, bus, coverageStore, degradedReason(backend, cfg.Env), cfg.MetricsAddr != "", ips, cfg.GraphQLIntrospection)
+	apiHandler, err := buildAPI(manager, analyzerSvc, indexer, authn, auditRec, apiLimiter, suppressStore, historyStore, ticketStore, validationStore, cfg.CORSAllowedOrigins, exportSigner, exfilWatcher, authGuard, authInfoFromConfig(cfg, authn.Enabled()), prOpener, aiClient, aiLimiter, bus, coverageStore, degradedReason(backend, cfg.Env), cfg.MetricsAddr != "", ips, cfg.GraphQLIntrospection, gateNormalizer)
 	if err != nil {
 		return err
 	}
 
 	var wg sync.WaitGroup
+
+	// Complete snapshots: once all of an ingest that described a scope in full has landed,
+	// what its source no longer lists is retracted.
+	if cfg.GraphSweep {
+		bus.WithSweeper(normalizer.Sweep)
+	} else {
+		slog.Info("complete snapshots are not applied (GRAPH_SWEEP=false): assets leave the graph by GRAPH_TTL only")
+	}
 
 	// Normalization consumer: bus -> identity resolution -> graph.
 	wg.Add(1)
@@ -1032,6 +1123,19 @@ func buildConnectors(ctx context.Context, cfg config.Config, pub connector.Publi
 			}
 			slog.Info("azure connector enabled", "mode", c.Mode())
 			conns = append(conns, c)
+		case "kubernetes":
+			c, err := k8sconn.NewFromConfig(k8sconn.Config{
+				Mode:        cfg.K8SConnectorMode,
+				Cluster:     cfg.K8SClusterName,
+				Account:     cfg.K8SAWSAccount,
+				FixturesDir: cfg.K8SFixturesDir,
+			})
+			if err != nil {
+				slog.Error("kubernetes connector disabled", "err", err)
+				continue
+			}
+			slog.Info("kubernetes connector enabled", "mode", c.Mode(), "cluster", cfg.K8SClusterName)
+			conns = append(conns, c)
 		default:
 			slog.Warn("unknown connector, skipping", "name", name)
 		}
@@ -1112,6 +1216,69 @@ func hmacSecrets(cfg config.Config) map[string]string {
 	return secrets
 }
 
+// configuredTenants lists every tenant the configuration names, as written: the per-tenant
+// ingest secrets, the API tokens and the connectors' tenant.
+func configuredTenants(cfg config.Config, tokens *auth.TokenStore) []string {
+	var out []string
+	for _, entry := range strings.Split(cfg.IngestHMACSecrets, ",") {
+		if tenant, secret, ok := strings.Cut(strings.TrimSpace(entry), ":"); ok && tenant != "" && secret != "" {
+			out = append(out, tenant)
+		}
+	}
+	out = append(out, tokens.Tenants()...)
+	if cfg.ConnectorTenant != "" {
+		out = append(out, cfg.ConnectorTenant)
+	}
+	return out
+}
+
+// servesSeveralTenants reports whether the configuration names a tenant besides the
+// default. There, a token that names no tenant cannot be read as the default tenant's.
+func servesSeveralTenants(cfg config.Config, tokens *auth.TokenStore) bool {
+	for _, t := range configuredTenants(cfg, tokens) {
+		if graph.NormalizeTenant(t) != graph.DefaultTenant {
+			return true
+		}
+	}
+	return false
+}
+
+// checkTenantNames refuses two names that become one tenant. The engine keys a tenant's
+// graph, its ingest secret and its analysis by the normalized name ([a-z0-9_]), so
+// "acme-corp" and "acme.corp" are one graph: two customers named that way would read each
+// other's attack paths, and the second ingest secret silently replaced the first. A
+// difference of case alone is the same name written twice, and stays accepted.
+func checkTenantNames(cfg config.Config, tokens *auth.TokenStore) error {
+	// Two ingest secrets for one tenant, in any case, are never meant: the second replaces
+	// the first, and whoever signs with the first is refused.
+	secretOf := map[string]string{}
+	if cfg.IngestHMACSecret != "" {
+		secretOf[graph.DefaultTenant] = "INGEST_HMAC_SECRET"
+	}
+	for _, entry := range strings.Split(cfg.IngestHMACSecrets, ",") {
+		if tenant, secret, ok := strings.Cut(strings.TrimSpace(entry), ":"); ok && tenant != "" && secret != "" {
+			n := graph.NormalizeTenant(tenant)
+			if prev, dup := secretOf[n]; dup {
+				return fmt.Errorf("two ingest secrets for tenant %q - %s and %q in INGEST_HMAC_SECRETS: the second "+
+					"would replace the first, and a sender signing with the first would be refused", n, prev, tenant)
+			}
+			secretOf[n] = fmt.Sprintf("%q in INGEST_HMAC_SECRETS", tenant)
+		}
+	}
+
+	spelling := map[string]string{}
+	for _, t := range configuredTenants(cfg, tokens) {
+		n := graph.NormalizeTenant(t)
+		if prev, ok := spelling[n]; ok && !strings.EqualFold(strings.TrimSpace(prev), strings.TrimSpace(t)) {
+			return fmt.Errorf("tenants %q and %q are one tenant to the engine - both become %q, so they would "+
+				"share one graph and one ingest secret. Spell each tenant one way, best in lower case with "+
+				"[a-z0-9_] only, in INGEST_HMAC_SECRETS, API_TOKENS and CONNECTOR_TENANT", prev, t, n)
+		}
+		spelling[n] = t
+	}
+	return nil
+}
+
 // authInfoFromConfig builds the public auth config the dashboard's login gate
 // reads (GET /auth/config). It carries no secrets - only whether a credential is
 // required and the IdP's public coordinates for an SSO redirect.
@@ -1151,8 +1318,8 @@ func authInfoFromConfig(cfg config.Config, authEnabled bool) api.AuthInfo {
 	return info
 }
 
-func buildAPI(manager *graph.Manager, svc *analyzer.Service, idx search.Indexer, authn auth.Authenticator, rec audit.Recorder, limiter *ratelimit.Limiter, suppressStore suppress.Suppressions, historyStore history.Temporal, ticketStore ticket.Tickets, validationStore validation.Verdicts, corsOrigins []string, exportSigner *exportsign.Signer, exfilWatcher, authGuard *secwatch.Watcher, authInfo api.AuthInfo, prOpener action.PROpener, aiClient ai.Client, aiLimiter *ratelimit.Limiter, batches api.BatchTracker, coverageStore *coverage.Store, degraded string, metricsElsewhere bool, ips *clientip.Resolver, introspection string) (http.Handler, error) {
-	return api.New(manager, svc, idx).WithAuth(authn, rec).WithRateLimit(limiter).WithSuppress(suppressStore).WithHistory(historyStore).WithTickets(ticketStore).WithValidation(validationStore).WithCORSOrigins(corsOrigins).WithExportSigner(exportSigner).WithAbuseWatchers(exfilWatcher, authGuard).WithClientIP(ips).WithIntrospection(introspection).WithAuthInfo(authInfo).WithRemediationPR(prOpener).WithAI(aiClient).WithAIRateLimit(aiLimiter).WithIngestBatches(batches).WithCoverage(coverageStore).WithDegraded(degraded).WithMetricsElsewhere(metricsElsewhere).Handler()
+func buildAPI(manager *graph.Manager, svc *analyzer.Service, idx search.Indexer, authn auth.Authenticator, rec audit.Recorder, limiter *ratelimit.Limiter, suppressStore suppress.Suppressions, historyStore history.Temporal, ticketStore ticket.Tickets, validationStore validation.Verdicts, corsOrigins []string, exportSigner *exportsign.Signer, exfilWatcher, authGuard *secwatch.Watcher, authInfo api.AuthInfo, prOpener action.PROpener, aiClient ai.Client, aiLimiter *ratelimit.Limiter, batches api.BatchTracker, coverageStore *coverage.Store, degraded string, metricsElsewhere bool, ips *clientip.Resolver, introspection string, gateNormalizer func(*graph.Manager) *normalization.Normalizer) (http.Handler, error) {
+	return api.New(manager, svc, idx).WithGate(allCollectors(), gateNormalizer).WithAuth(authn, rec).WithRateLimit(limiter).WithSuppress(suppressStore).WithHistory(historyStore).WithTickets(ticketStore).WithValidation(validationStore).WithCORSOrigins(corsOrigins).WithExportSigner(exportSigner).WithAbuseWatchers(exfilWatcher, authGuard).WithClientIP(ips).WithIntrospection(introspection).WithAuthInfo(authInfo).WithRemediationPR(prOpener).WithAI(aiClient).WithAIRateLimit(aiLimiter).WithIngestBatches(batches).WithCoverage(coverageStore).WithDegraded(degraded).WithMetricsElsewhere(metricsElsewhere).Handler()
 }
 
 // serveHTTP runs srv until ctx ends. A listener that fails - a port already taken, a

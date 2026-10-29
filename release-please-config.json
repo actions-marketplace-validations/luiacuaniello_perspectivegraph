@@ -20,7 +20,15 @@
         },
         {
           "type": "generic",
-          "path": "docs/MANUAL.md"
+          "path": "docs/manual/kubernetes.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/manual/single-vm.md"
+        },
+        {
+          "type": "generic",
+          "path": "docs/manual/connect-your-own.md"
         },
         {
           "type": "generic",
@@ -28,7 +36,15 @@
         },
         {
           "type": "generic",
+          "path": "SECURITY.md"
+        },
+        {
+          "type": "generic",
           "path": "docker-compose.demo.yml"
+        },
+        {
+          "type": "generic",
+          "path": "docker-compose.vm.yml"
         },
         {
           "type": "generic",

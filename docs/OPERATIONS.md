@@ -70,7 +70,7 @@ Empty refuses every real write. The pairing matters: the allowlist bounds where 
 engine *asks* to write, the token scope bounds what the forge *lets* it write, and
 neither alone is sufficient.
 
-Two ready-to-use hardened profiles apply all of the above:
+Three ready-to-use hardened profiles apply the settings above:
 
 - **Kubernetes (recommended):** `deploy/helm/perspectivegraph/values-production.yaml` -
   auth + ingest HMAC on, external Postgres+AGE with `sslMode: verify-full`, TLS at the
@@ -93,12 +93,20 @@ Two ready-to-use hardened profiles apply all of the above:
   ```
 
   It is cosign-signed; verify it before it runs (see the
-  [manual](MANUAL.md#deploy-to-kubernetes)). From a git checkout instead, swap the
+  [manual](manual/kubernetes.md)). From a git checkout instead, swap the
   `oci://…` reference for `deploy/helm/perspectivegraph`.
 
-- **Docker Compose (single host / on-prem):** `.env.production.example` (copy to `.env`,
+- **One machine (a VM with Docker and a DNS name):** `make prod-init DOMAIN=<name>` - every
+  credential generated as a file, TLS from Caddy with a certificate it renews, an
+  authenticated bus, the governance state in the database, and a dump every day whose
+  restore CI runs on every change. [Production on one machine](manual/single-vm.md) is the
+  procedure around it. It runs the bundled database, so it is the profile for an estate one
+  machine can hold, not for one that needs a database you can fail over.
+
+- **Docker Compose, assembled by hand:** `.env.production.example` (copy to `.env`,
   fill in, `chmod 600`) plus the `docker-compose.prod.yml` override for the in-app TLS cert
-  mount.
+  mount - for when the backend serves TLS itself with a certificate of yours, or the
+  pieces above are ones you already run.
 
   ```bash
   cp .env.production.example .env   # then fill it in and: chmod 600 .env
@@ -120,7 +128,9 @@ inherits it. A mounted file keeps the value out of all of that, and it is what m
 Docker secrets, Swarm secrets, a Vault Agent sidecar and a Kubernetes Secret mounted as a
 volume work without the credential ever passing through the environment.
 
-**Docker.** An overlay ships with the repo:
+**Docker.** An overlay ships with the repo. On one machine, `make prod-init` creates the
+files and the rest of the production stack with them - see
+[Production on one machine](manual/single-vm.md). By hand:
 
 ```bash
 mkdir -p secrets && chmod 700 secrets
@@ -128,10 +138,16 @@ printf '%s' "$(openssl rand -hex 32)"        > secrets/ingest_hmac_secret
 printf '%s' "tok-$(openssl rand -hex 16):admin" > secrets/api_tokens
 printf '%s' "$(openssl rand -hex 32)"        > secrets/postgres_password
 printf '%s' "$(openssl rand -hex 32)"        > secrets/store_encryption_key
-chmod 600 secrets/*
+chmod 644 secrets/*
 
 docker compose -f docker-compose.yml -f docker-compose.secrets.yml --profile app up -d
 ```
+
+The files are 644 and the directory 700, and not the other way round: Compose mounts each
+file with the host's owner and mode, and the containers open them as their own users - the
+backend as uid 65532, Postgres as 999 - so on Linux a 600 file of yours is one neither can
+read, and the backend refuses to start. The directory is what keeps other users of the
+machine out. (Docker Desktop maps ownership, which hides the difference on a laptop.)
 
 It mounts each file at `/run/secrets/…`, points the matching `*_FILE` variable at it,
 blanks the environment-borne version so a stale value cannot win, and sets
@@ -161,20 +177,23 @@ act on everywhere, and it is worth settling before anything else in this runbook
 | Where | AGE | What it costs you |
 |---|---|---|
 | **Azure Database for PostgreSQL flexible server** | **yes** (PostgreSQL 16 and below) | The only managed service that ships it. Turned on with two server parameters (recipe below). Not available on PostgreSQL 17, and AGE is excluded from Azure's in-place major-version upgrade |
+| **CloudNativePG** in your cluster - `postgres.cloudnativepg.enabled` in the chart | yes | Replicas, failover, verified TLS and backups to object storage, run by the operator. The storage, the operator's upgrades and restore drills are yours ([Kubernetes](manual/kubernetes.md#a-production-database-cloudnativepg)) |
 | **Self-managed** on Kubernetes or a VM | yes | Backups, failover, patching and TLS become yours. The `apache/age` image, or the one this project builds in `deploy/postgres`, already preloads the extension |
 | **AWS RDS / Aurora PostgreSQL** | **no** | Not on the extension allow-list. Requests go to `rds-postgres-extensions-request@amazon.com` |
 | **Google Cloud SQL / AlloyDB** | **no** | Not in the supported-extensions list |
 | The bundled `perspectivegraph-postgres` container | yes | **Demo only.** Not sized, backed up or tuned for production, whatever its vulnerability report says |
 
-So on AWS and GCP today the honest choice is to run Postgres+AGE yourself. One thing makes
-that a smaller decision than it looks: the graph is **derived** state - every node and edge
+So on AWS and GCP today the honest choice is to run Postgres+AGE yourself - on Kubernetes,
+under CloudNativePG, which the chart sets up. One thing makes that a smaller decision than it
+looks: the graph is **derived** state - every node and edge
 is reconstructible by re-ingesting the feeds - so a lost database is a re-seed rather than a
 data-loss event (§4). Losing it costs you history, not the map.
 
 ### What the engine needs of it
 
-Tested against **PostgreSQL 16 + AGE 1.6.0** - the digest-pinned image the demo and the CI
-integration job both run. Other combinations are not tested here.
+Tested against **PostgreSQL 17 + AGE 1.7.0** - the images the chart deploys, bundled and
+under CloudNativePG, and the one the CI integration job runs. Other combinations are not
+tested here.
 
 **The role does not need to be a superuser.** These grants are enough:
 
@@ -218,9 +237,11 @@ succeed, it fails with a privilege error.
 
 ### Self-managed
 
-Run `ghcr.io/luiacuaniello/perspectivegraph-postgres` (or `apache/age`, or your own build
-of the extension) as a StatefulSet, under a
-PostgreSQL operator with that image, or on a VM. Whatever you pick, the list of things you
+On Kubernetes, the chart can hand the database to the CloudNativePG operator, which takes
+most of the list below off you - see
+[A production database: CloudNativePG](manual/kubernetes.md#a-production-database-cloudnativepg).
+Otherwise run `ghcr.io/luiacuaniello/perspectivegraph-postgres` (or `apache/age`, or your own
+build of the extension) as a StatefulSet, under another PostgreSQL operator, or on a VM. Whatever you pick, the list of things you
 have just taken on is the same, and none of it is optional for production: backups with a
 tested restore (§4), a replica and a failover path, patching for both PostgreSQL and AGE,
 TLS, and monitoring. §4 covers backup and restore; the demo image is not a starting point
@@ -237,25 +258,50 @@ POSTGRES_DSN=postgres://user:pass@db.internal:5432/perspectivegraph?sslmode=veri
 ## 4. Backup & restore (the graph is sensitive data)
 
 The graph in Postgres+AGE is your source of truth and a map of the attack surface - back
-it up and test the restore.
+it up and test the restore. On one machine the [single-VM recipe](manual/single-vm.md) does
+both: a dump every day, `scripts/prod-restore.sh` to bring one back, and CI restores one on
+every change. Under CloudNativePG the operator's backups are physical copies, which need
+none of what follows ([Kubernetes](manual/kubernetes.md#a-production-database-cloudnativepg)).
 
 ```bash
-# Backup: dump the whole database (includes ag_catalog + the graph schema)
+# Backup: the whole database - the graph's schema, AGE's catalog and, with
+# GOVERNANCE_BACKEND=postgres, triage, tickets, verdicts and the audit chain.
 pg_dump --format=custom --no-owner --dbname="$POSTGRES_DSN" --file pg-graph.dump
 
-# Restore into a fresh instance that already has the AGE extension loaded
-createdb perspectivegraph
-psql -d perspectivegraph -c 'CREATE EXTENSION IF NOT EXISTS age;'
-pg_restore --no-owner --dbname=perspectivegraph pg-graph.dump
+# Restore into a new, empty database: the dump creates the AGE extension itself.
+createdb perspectivegraph_restore
+pg_restore --no-owner --exit-on-error --dbname=perspectivegraph_restore pg-graph.dump
+
+# Re-attach AGE's catalog to the restored schema - not optional, see below.
+psql -d perspectivegraph_restore -v ON_ERROR_STOP=1 <<'SQL'
+BEGIN;
+SET LOCAL session_replication_role = replica;
+UPDATE ag_catalog.ag_label l SET graph = g.namespace::oid
+  FROM ag_catalog.ag_graph g
+ WHERE l.graph = g.graphid AND g.graphid <> g.namespace::oid;
+UPDATE ag_catalog.ag_graph SET graphid = namespace::oid WHERE graphid <> namespace::oid;
+COMMIT;
+SQL
+# Then point the backend at it (POSTGRES_DB), or rename it into the old one's place.
 ```
 
 Notes:
-- Restore into a database where `CREATE EXTENSION age` has run first; AGE graph data lives
-  under `ag_catalog` and the graph's own schema, both captured by a full `pg_dump`.
+- **The last step is what makes the restore work.** AGE names each graph in its own catalog
+  by a raw OID - the OID of the graph's schema, in `ag_graph.graphid` and `ag_label.graph` -
+  and `pg_dump` writes it as a plain number. The schema the restore creates gets a new OID,
+  so without the fix every query fails with `graph with oid N does not exist` (measured on
+  AGE 1.7.0; the recipe here before 1.36.0 stopped at `pg_restore` and had this flaw). The
+  fix sets both columns back to the value `create_graph` gives them. The foreign key between
+  them does not cascade, hence `session_replication_role`: a superuser, or on PostgreSQL 15
+  and later a role granted `SET ON PARAMETER session_replication_role`.
+- The new database needs nothing beforehand: the dump creates the extension, and its
+  catalog rows come back with the data.
 - Store dumps encrypted (they contain A1 from the threat model). Apply the same retention
-  and access controls you would to a secrets store.
-- Validation/verdict data persists separately via `VALIDATIONS_PATH`; back that path up too
-  if you rely on the calibration history.
+  and access controls you would to a secrets store. Keep `STORE_ENCRYPTION_KEY` apart from
+  them, and keep it: the audit chain in a dump is sealed with it.
+- With `GOVERNANCE_BACKEND=file` the governance stores live on the backend's volume, not in
+  the database (`VALIDATIONS_PATH`, `SUPPRESSIONS_PATH`, `HISTORY_PATH`, `TICKETS_PATH`,
+  `AUDIT_LOG_PATH`): back that volume up too.
 
 ## 5. Upgrades
 
@@ -275,14 +321,23 @@ Pin to a signed, digest-referenced image and verify it before rollout (see
 
 - `GET /healthz` - liveness/readiness (the container HEALTHCHECK uses the `healthz`
   subcommand; distroless has no shell).
+- **Which release is running**: the first line of the backend's log
+  (`perspectivegraph starting version=vX.Y.Z`, from 1.37), `perspectivegraph version` in the
+  container, and `perspectivegraph_build_info{version,goversion}` on `/metrics` - one series
+  per replica, so a rollout that has not reached all of them shows as two versions.
 - `GET /metrics` - Prometheus metrics: `perspectivegraph_connector_*`,
   `perspectivegraph_analyzer_*`, ingest and auth counters, and
   `perspectivegraph_broker_connected` (0 while the bus is reconnecting).
   `perspectivegraph_auth_denied_total{surface,reason}` counts refused credentials where
-  they are refused (API and ingest); `perspectivegraph_ingest_signatures_total{version}`
+  they are refused (API and ingest; `anonymous_ai` and `anonymous_gate` are visitors turned
+  away from the paid and the heavy endpoints); `perspectivegraph_ingest_signatures_total{version}`
   shows whether anything still signs v1; `perspectivegraph_graph_pending_edges` counts
   edges waiting for an endpoint. The pending count is refreshed by each replica's own
   analyzer pass, so on a replica that wrote nothing it can lag by a few passes.
+  `perspectivegraph_graph_sweeps_total{source,result}` counts complete snapshots applied
+  and `perspectivegraph_graph_swept_total{kind}` what they removed (`node`, `edge`) or set
+  waiting (`parked`); a jump in removals for one source is the thing to look at when an
+  asset disappears unexpectedly - the log line names the scope.
 - Suggested SLOs to alert on: ingest error rate, analyzer pass duration vs
   `ANALYZER_INTERVAL`, connector `last_error`, and `auth.deny` spikes (possible
   credential stuffing) from the audit log.
@@ -472,7 +527,7 @@ they cross the boundary - verifying inside is verifying a copy you already trust
 
 ```bash
 # The release you are approving.
-V=1.20.0 # x-release-please-version
+V=1.39.2 # x-release-please-version
 ID_RE='https://github.com/luiacuaniello/perspectivegraph/.*'
 ISSUER=https://token.actions.githubusercontent.com
 
@@ -532,7 +587,7 @@ spec:
     repoURL: ghcr.io/luiacuaniello/charts
     chart: perspectivegraph
     # Pinned: let a bump be a reviewed commit, not a surprise resync.
-    targetRevision: 1.20.0 # x-release-please-version
+    targetRevision: 1.39.2 # x-release-please-version
     helm:
       valueFiles: [values-production.yaml] # ships inside the chart; override with your own
   destination:
@@ -554,9 +609,9 @@ capability to gain.
 
 - [ ] API auth enabled (`API_TOKENS`/OIDC) and verified from an unauthenticated client.
 - [ ] `GET /auth/me` with each issued token answers the role you meant to grant.
-- [ ] Ingest HMAC (`INGEST_HMAC_SECRETS`) + `INGEST_RATE_RPS` set, and - once
-      `perspectivegraph_ingest_signatures_total{version="v1"}` stays at 0 -
-      `INGEST_HMAC_ACCEPT_V1=false`, so a captured ingest request cannot be replayed.
+- [ ] Ingest HMAC (`INGEST_HMAC_SECRETS`) + `INGEST_RATE_RPS` set, and
+      `INGEST_HMAC_ACCEPT_V1` left at its default `false`, so a captured ingest request
+      cannot be replayed.
 - [ ] TLS everywhere (`TLS_*`, `POSTGRES_SSLMODE=verify-full`, `NATS_TLS_*`).
 - [ ] External Postgres+AGE chosen with §3 open (managed on Azure, self-managed on AWS/GCP),
       its role non-superuser, and the demo image out of the deployment.
@@ -566,7 +621,12 @@ capability to gain.
 - [ ] Backup scheduled and a restore rehearsed (section 4).
 - [ ] `/metrics` scraped; alerts on the SLOs above.
 - [ ] Images verified (cosign signature + SBOM + provenance) before rollout.
-- [ ] Engine behind a gateway/WAF; network policy between components.
+- [ ] Engine behind a gateway/WAF; network policy between components (`networkPolicy.enabled`,
+      and `networkPolicy.backendFrom` naming the ingress controller's namespace).
+- [ ] NATS authenticates its clients: the chart's does on its own; an external one needs
+      `NATS_USER`/`NATS_PASSWORD`. Rendering with `helm template` (Argo CD, Flux), pin
+      `postgres.auth.password` and `nats.auth.password` (or bring the Secrets), since a
+      render without the cluster cannot keep a generated one.
 
 See the [threat model operator assumptions](THREAT-MODEL.md#operator-assumptions-what-you-must-do-for-production)
 for the rationale behind each item.
@@ -616,6 +676,9 @@ open-instance banner. The backend tells the two apart; the page does not guess.
 - **It does not answer AI questions for visitors.** `/ai/*` needs a signed-in caller, so
   anonymous visitors get none even if a key is configured - but keep keys off a published
   instance anyway.
+- **It does not run the merge gate for visitors.** `POST /gate/impact` analyses a report
+  the caller sends, so it needs a signed-in caller too; a CI gate pointed at a published
+  instance passes a token.
 
 **Per visitor, not per proxy.** A published instance is always reached through a proxy:
 in the compose recipe every visitor comes through the dashboard's nginx. Keyed on that

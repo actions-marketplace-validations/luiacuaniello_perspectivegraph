@@ -8,6 +8,10 @@ export interface Node {
   label: string;
   name: string;
   internetExposed: boolean;
+  // What the internet reaches, port by port ("tcp/22, tcp/443"), and the part of it that
+  // is a remote shell, a control plane or a database. Absent when no source says.
+  exposedPorts?: string | null;
+  exposedManagementPorts?: string | null;
   crownJewel: boolean;
   crownJewelBasis?: string | null;
   classification?: string | null;
@@ -70,12 +74,20 @@ export interface Step {
   attack?: AttackTechnique | null;
 }
 
+// CutEdge is the edge of a path a fix severs - where the kill chain is cut.
+export interface CutEdge {
+  from: string;
+  to: string;
+  type: string;
+}
+
 export interface Remediation {
   title: string;
   kind: string;
   filename: string;
   rationale: string;
   content: string;
+  cut?: CutEdge | null;
 }
 
 export interface Detection {
@@ -108,6 +120,9 @@ export interface RemediationEffect {
   pathsAfter: number;
   pathsEliminated: number;
   riskReductionPct: number;
+  // Drop in the expected number of crown jewels compromised. Unlike riskReductionPct it
+  // does not saturate while another jewel is open to anyone.
+  expectedReduction?: number | null;
   verified: boolean;
 }
 
@@ -222,6 +237,32 @@ export interface Calibration {
   priorityDiscrimination?: Discrimination | null;
 }
 
+// A lab's latest run on a real AWS account, built into the backend: how this version's rules
+// were checked against AWS - a fact about the engine, not about the estate it reads.
+export interface LabCheck {
+  case: string;
+  question: string;
+  referee: string;
+  aws: string;
+  engine: string;
+  verdict: "agree" | "disagree" | "unsettled";
+  note?: string | null;
+}
+
+export interface LabRun {
+  lab: string;
+  title: string;
+  command: string;
+  region: string;
+  engine: string;
+  ranAt: string;
+  cost: string;
+  agreed: number;
+  disagreed: number;
+  unsettled: number;
+  checks: LabCheck[];
+}
+
 // One sample of the calibration trend: the headline numbers at a point in time, so a
 // calibration program can watch the evidence accumulate.
 export interface CalibrationTrendPoint {
@@ -243,6 +284,9 @@ export interface AttackPath {
   id: string;
   score: number;
   runtimeConfirmed: boolean;
+  // A crown jewel open to anyone (public-read bucket, role any principal may assume):
+  // its path is the jewel alone, no steps, score 1.
+  directAccess?: boolean | null;
   // How much to trust `score` given how its edge weights were derived, and the
   // qualitative band (high|medium|low) - honesty about probability provenance.
   confidence?: number | null;
@@ -270,6 +314,9 @@ export interface AttackPath {
   priority?: number | null;
   priorityLabel?: string | null;
   priorityFactors?: string[] | null;
+  // Why the path is in its band, when a fact put it there (a runtime alert, open access,
+  // a KEV on a likely route, a red-team verdict) rather than the blended number.
+  priorityReason?: string | null;
   nodes: Node[];
   steps: Step[];
   remediations: Remediation[];
@@ -420,12 +467,13 @@ export interface EdgeCut {
 export interface WhatIfResult {
   removedEdges: number;
   riskReduction: number;
+  expectedReduction?: number | null;
   beforeRisk: { anyCompromiseProbability: number };
   afterRisk: { anyCompromiseProbability: number };
   after: { id: string }[];
 }
 
-const NODE_FIELDS = `id label name account internetExposed crownJewel crownJewelBasis classification secretsScrubbed runtimeAlert severity cvss kev epss resolutionMethod resolutionConfidence resolutionAlias signed slsaLevel sbomComponents`;
+const NODE_FIELDS = `id label name account internetExposed exposedPorts exposedManagementPorts crownJewel crownJewelBasis classification secretsScrubbed runtimeAlert severity cvss kev epss resolutionMethod resolutionConfidence resolutionAlias signed slsaLevel sbomComponents`;
 
 // PATH_LIMIT bounds how many attack paths the dashboard pulls per refresh. The
 // analyzer returns them priority-first, so this is the Top-N a human can actually
@@ -466,6 +514,7 @@ const dashboardQuery = (app?: string) => {
       id
       score
       runtimeConfirmed
+      directAccess
       confidence
       confidenceLabel
       scoreUpperBound
@@ -477,6 +526,7 @@ const dashboardQuery = (app?: string) => {
       priority
       priorityLabel
       priorityFactors
+      priorityReason
       suppressed
       suppression { reason owner note createdAt expiresAt }
       firstSeen openForSeconds reopens
@@ -484,7 +534,7 @@ const dashboardQuery = (app?: string) => {
       validation { outcome source evidence testedAt }
       nodes { ${NODE_FIELDS} }
       steps { edgeType from to probability resolutionMethod resolutionConfidence weightBasis weightConfidence attack { id name tactic tacticId url } }
-      remediations { title kind filename rationale content }
+      remediations { title kind filename rationale content cut { from to type } }
       detections { kind title filename rationale content }
     }
     remediationPlan${scope} {
@@ -537,7 +587,7 @@ export const verifyFix = (title: string, app?: string) => {
   {
     remediationPlan(${args}) {
       title
-      verification { removedEdges pathsBefore pathsAfter pathsEliminated riskReductionPct verified }
+      verification { removedEdges pathsBefore pathsAfter pathsEliminated riskReductionPct expectedReduction verified }
     }
   }
 `).then((d) => d.remediationPlan[0]?.verification ?? null);
@@ -716,7 +766,7 @@ export const runWhatIf = (cuts: EdgeCut[]) =>
   gql<{ whatIf: WhatIfResult }>(
     `query WhatIf($cuts: [EdgeCutInput!]!) {
        whatIf(cuts: $cuts) {
-         removedEdges riskReduction
+         removedEdges riskReduction expectedReduction
          beforeRisk { anyCompromiseProbability }
          afterRisk { anyCompromiseProbability }
          after { id }
@@ -726,6 +776,12 @@ export const runWhatIf = (cuts: EdgeCut[]) =>
   ).then((d) => d.whatIf);
 
 export const fetchDashboard = (app?: string) => gql<Dashboard>(dashboardQuery(app));
+
+export const fetchLabRuns = () =>
+  gql<{ labRuns: LabRun[] | null }>(
+    `{ labRuns { lab title command region engine ranAt cost agreed disagreed unsettled
+         checks { case question referee aws engine verdict note } } }`,
+  ).then((d) => d.labRuns ?? []);
 
 export interface Status {
   version: string;

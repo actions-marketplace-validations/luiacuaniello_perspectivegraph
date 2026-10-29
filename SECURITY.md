@@ -68,6 +68,24 @@ in their place.
 
 Please give us a reasonable window to ship a fix before any public disclosure.
 
+## How a fix is disclosed
+
+Every confirmed vulnerability gets a GitHub Security Advisory with a CVE, whoever found
+it: a reporter, or the maintainers' own review. The advisory names the versions affected
+and the version that fixes it, so an operator can tell whether a deployment is exposed
+without reading the code. They are listed on the
+[advisories page](https://github.com/luiacuaniello/perspectivegraph/security/advisories).
+
+The release that carries a fix says so where each kind of user looks:
+
+- its release notes link the advisory next to the fix;
+- that version of the Helm chart sets `artifacthub.io/containsSecurityUpdates: "true"`
+  and lists the fix under `artifacthub.io/changes` with `kind: security`, so Artifact Hub
+  marks it as a security update. The next release drops both, or every later version
+  would claim the same fix;
+- the advisory is published with the release, not before: until then it stays a
+  private draft.
+
 ## Scope
 
 **In scope** - vulnerabilities in PerspectiveGraph itself, for example:
@@ -98,14 +116,15 @@ Please give us a reasonable window to ship a fix before any public disclosure.
 Because the tool maps how to breach the org, **harden any deployment reachable
 beyond a trusted boundary**. See the [threat model](docs/THREAT-MODEL.md) for the
 full trust-boundary and asset analysis and the operator checklist. The controls below are built in and documented in the
-[manual's "Application hardening" section](./docs/MANUAL.md#application-hardening) and in
+[manual's "Application hardening" section](./docs/manual/security.md#application-hardening) and in
 [`.env.example`](./.env.example):
 
 - **`API_TOKENS` / OIDC** - bearer auth with role + per-application RBAC (tokens
   support expiry and `sha256$`-hashed-at-rest storage).
 - **`INGEST_HMAC_SECRET`** - signed ingestion so scanner data can't be forged.
 - **`STORE_ENCRYPTION_KEY`** - AES-256-GCM at-rest encryption of the governance
-  stores and the audit log.
+  stores and the audit log, with a random key of 64 hex characters (a production
+  deployment refuses a passphrase).
 - **`EXPORT_SIGNING_KEY`** - Ed25519-signed OSCAL/SIEM exports a consumer can verify.
 - **`AUDIT_LOG_PATH`** - tamper-evident, hash-chained audit log of reads and writes
   (verify with `perspectivegraph verify-audit <file>`, or `verify-audit -postgres` when
@@ -120,9 +139,11 @@ auth or persistence is left off.
 ## Our own supply chain
 
 The project holds itself to the bar it sets: CI runs `gosec` (SAST), **CodeQL**
-(semantic taint analysis), `gitleaks` (secret scan), `govulncheck`, and a Trivy image
-scan; backend images are distroless, non-root, read-only-rootfs, and digest-pinned.
-GitHub Actions are pinned to commit SHAs (Dependabot keeps them current) and an OpenSSF
+(semantic taint analysis of the Go and TypeScript code, and of the workflows themselves),
+`gitleaks` (secret scan), `govulncheck`, and a Trivy image scan; backend images are
+distroless, non-root, read-only-rootfs, and digest-pinned. GitHub Actions are pinned to
+commit SHAs, and Dependabot keeps them current along with every base image and the
+compose files' images; a test fails when a Dockerfile has no Dependabot entry. An OpenSSF
 Scorecard workflow tracks the repo's posture.
 
 The collector **parse boundary** - where attacker-influenceable scanner/cloud/cluster
@@ -137,7 +158,9 @@ GitHub release), and carry a **SLSA build-provenance** attestation. Verify befor
 run them:
 
 ```bash
-IMG=ghcr.io/luiacuaniello/perspectivegraph:v0.3.0
+# The release you run; the dashboard and database images (perspectivegraph-dashboard,
+# perspectivegraph-postgres) verify the same way.
+IMG=ghcr.io/luiacuaniello/perspectivegraph:v1.39.2 # x-release-please-version
 ID_RE="^https://github.com/luiacuaniello/perspectivegraph/.github/workflows/"
 ISSUER=https://token.actions.githubusercontent.com
 

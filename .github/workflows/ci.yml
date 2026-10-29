@@ -21,7 +21,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.3"
           cache-dependency-path: backend/go.sum
       - run: go build ./...
       - run: go vet ./...
@@ -56,8 +56,20 @@ jobs:
       # It did exactly that - staticcheck 0.8 raised its floor to Go 1.26 and, with
       # GOTOOLCHAIN=local, the step failed to build the tool rather than the code. Bump
       # this deliberately, alongside the toolchain.
+      #
+      # 0.8.1 is built against golang.org/x/tools v0.51.0 instead of run as it ships: its
+      # own x/tools reads export data up to version 4, Go 1.27.2 writes version 5, and
+      # every package failed to import (dominikh/go-tools#1832). Go back to
+      # `go run honnef.co/go/tools/cmd/staticcheck@<version> ./...` once a release carries
+      # the newer x/tools. Both versions are pinned, and the checksum database verifies
+      # them as it does any other module.
       - name: staticcheck
-        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
+        run: |
+          tools="$(mktemp -d)"
+          (cd "$tools" && go mod init staticcheck \
+            && go get honnef.co/go/tools/cmd/staticcheck@v0.8.1 golang.org/x/tools@v0.51.0 \
+            && go build -o staticcheck honnef.co/go/tools/cmd/staticcheck)
+          "$tools/staticcheck" ./...
 
   secrets:
     name: Secret scan (gitleaks)
@@ -98,6 +110,11 @@ jobs:
     # exercises. Built and started as a step instead, exactly like NATS below.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Docker Hub rate-limits the runners' shared addresses ("429 Too Many Requests"); its
+      # images come through Google's mirror instead, by the digests they are pinned to.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        # By path from the workspace: some jobs run their steps from backend/.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-docker-mirror.sh" "$GITHUB_WORKSPACE/deploy/postgres/Dockerfile"
 
       - name: Build and start the Postgres+AGE image this release ships
         working-directory: .
@@ -118,7 +135,7 @@ jobs:
           echo "::error::Postgres never became ready"; docker logs postgres; exit 1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.3"
           cache-dependency-path: backend/go.sum
       # The contract test creates the AGE extension + graph itself; just run it.
       # JetStream cannot be a service container: GitHub gives no way to pass the -js
@@ -128,7 +145,7 @@ jobs:
         run: |
           set -euo pipefail
           docker run -d --name nats -p 4222:4222 \
-            nats:2.15.0-scratch@sha256:c0d27f3054601a99055aa5ec897b0a55bf1869ae50f454e659acfbbea11d2ab7 -js
+            nats:2.15.1-scratch@sha256:3af42719041e578167e4f14c67a01d2fdc3c2ee4a228ca8315c6c0e18e15fdac -js
           for _ in $(seq 1 30); do
             if nc -z localhost 4222; then echo "nats up"; exit 0; fi
             sleep 1
@@ -196,16 +213,51 @@ jobs:
 
       # `restricted` is the Pod Security Standard most clusters this lands in enforce, and
       # a pod that misses one of its fields is refused admission rather than merely being
-      # less hardened - so this is a compatibility gate as much as a security one. Both
-      # value sets are checked: the demo defaults and the production overlay.
+      # less hardened - so this is a compatibility gate as much as a security one. The demo
+      # defaults and the production overlay are checked, each also with the database handed
+      # to CloudNativePG - a render that needs the operator's API, which --api-versions
+      # declares here because no cluster is there to answer.
       - name: Admissible (restricted PSS) and self-healing (probes)
         run: |
           set -euo pipefail
-          for values in "" "-f deploy/helm/perspectivegraph/values-production.yaml"; do
+          cnpg="--api-versions postgresql.cnpg.io/v1/Cluster --set postgres.cloudnativepg.enabled=true"
+          prod="-f deploy/helm/perspectivegraph/values-production.yaml"
+          generated="--set secrets.existingSecret= --set secrets.generate=true --set postgres.auth.password=ci"
+          for values in "" "$prod" "$cnpg" "$cnpg $prod" "$prod $generated"; do
             # shellcheck disable=SC2086
             helm template pg deploy/helm/perspectivegraph $values \
               | python3 scripts/chart-check.py
           done
+
+      # The ingress passes scanner reports to /ingest and /gate, and the nginx-based
+      # controllers refuse a body over 1 MiB unless told otherwise - a 413 the engine never
+      # sees. The chart sets their annotations; an operator's own must still win, and an
+      # empty maxBodySize must leave the controller alone. (That the value matches the
+      # backend's limit is internal/config's TestProxiesPassEveryReportTheBackendAccepts.)
+      - name: Ingress passes a scanner report
+        run: |
+          set -euo pipefail
+          render() {
+            helm template pg deploy/helm/perspectivegraph \
+              --set ingress.enabled=true --set ingress.allowUnauthenticated=true "$@"
+          }
+          check() {
+            python3 -c '
+          import sys, yaml
+          want = dict(a.split("=", 1) for a in sys.argv[1:] if "=" in a)
+          gone = [a[1:] for a in sys.argv[1:] if a.startswith("!")]
+          ing = next(d for d in yaml.safe_load_all(sys.stdin) if d and d.get("kind") == "Ingress")
+          got = ing["metadata"].get("annotations") or {}
+          bad = [f"{k}={got.get(k)!r}, want {v!r}" for k, v in want.items() if got.get(k) != v]
+          bad += [f"{k} set to {got[k]!r}, want it absent" for k in gone if k in got]
+          sys.exit("; ".join(bad)) if bad else print("ok:", got)
+          ' "$@"
+          }
+          render | check nginx.ingress.kubernetes.io/proxy-body-size=32m nginx.org/client-max-body-size=32m
+          render --set-string 'ingress.annotations.nginx\.ingress\.kubernetes\.io/proxy-body-size=64m' \
+            | check nginx.ingress.kubernetes.io/proxy-body-size=64m nginx.org/client-max-body-size=32m
+          render --set ingress.maxBodySize= \
+            | check '!nginx.ingress.kubernetes.io/proxy-body-size' '!nginx.org/client-max-body-size'
 
       # The CSP pins a hash of the one inline script in index.html, and two nginx configs
       # serve the same SPA - the image's and the chart's. Either drifting shows up as a
@@ -269,7 +321,7 @@ jobs:
   # nothing exercised. This does not reach the declared floor - kind cannot boot a node
   # that old - so it brackets what is actually supportable instead of pretending.
   chart-install:
-    name: Helm install (kind ${{ matrix.k8s }})
+    name: Helm install (kind ${{ matrix.k8s }}${{ matrix.database == 'cloudnativepg' && ', CloudNativePG' || '' }}${{ matrix.connector == 'kubernetes' && ', Kubernetes connector' || '' }})
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -280,8 +332,24 @@ jobs:
             node: kindest/node:v1.33.12@sha256:3f5c8443c620245e4d355cfe09e96a91ead32ceaa569d3f1ca9edf0cb2fe2ff4
           - k8s: v1.36.1
             node: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+          # The database run by the CloudNativePG operator instead of the bundled pod: the
+          # script installs the operator, and deletes the primary to prove a write still
+          # lands. One Kubernetes version is enough - what varies here is the operator.
+          - k8s: v1.36.1
+            node: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+            database: cloudnativepg
+          # The backend reading the cluster it runs in: a workload bound to cluster-admin is
+          # found with nothing posted, and retracted once the binding is deleted.
+          - k8s: v1.36.1
+            node: kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977baea8a6e553784dab7b84759d1014dbd78f7ebd5
+            connector: kubernetes
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Docker Hub rate-limits the runners' shared addresses ("429 Too Many Requests"); its
+      # images come through Google's mirror instead, by the digests they are pinned to.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        # By path from the workspace: some jobs run their steps from backend/.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-docker-mirror.sh"
 
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
@@ -302,7 +370,7 @@ jobs:
       # pinned one is the one on PATH rather than trusting PATH order.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.3"
           cache: false
 
       - name: Install kind v0.31.0
@@ -317,9 +385,92 @@ jobs:
       - name: Install the chart and wait for every pod
         env:
           NODE_IMAGE: ${{ matrix.node }}
+          DATABASE: ${{ matrix.database || 'bundled' }}
+          CONNECTOR: ${{ matrix.connector || '' }}
         run: |
           kind version | grep -q '^kind v0\.31\.0 ' || { echo "wrong kind on PATH: $(kind version)"; exit 1; }
           bash scripts/chart-install.sh
+
+  # The single-VM recipe (make prod-init: docker-compose.vm.yml behind Caddy) run the way an
+  # operator runs it, and on Linux on purpose: Compose mounts secrets with the host's owners
+  # and modes, which decide whether the containers can open them at all - and Docker Desktop
+  # maps ownership away, so a laptop cannot show it. It checks TLS, the API and NATS
+  # credentials, a signed ingest through Caddy, a backup, and a restore of that backup. The
+  # script is the command a contributor runs (make prod-smoke), not a CI-only path.
+  prod-smoke:
+    name: Single-VM recipe (prod-init, TLS, backup, restore)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Docker Hub rate-limits the runners' shared addresses ("429 Too Many Requests"); its
+      # images come through Google's mirror instead, by the digests they are pinned to.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        # By path from the workspace: some jobs run their steps from backend/.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-docker-mirror.sh" "$GITHUB_WORKSPACE/docker-compose.yml" "$GITHUB_WORKSPACE/deploy/caddy/Dockerfile"
+      # For the CLI the check signs its reports with, built from this commit.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.27.3"
+          cache-dependency-path: backend/go.sum
+      - name: Run the recipe end to end
+        run: bash scripts/prod-smoke.sh
+
+  # `make demo` is the first command in the README, and no job ran it: the one above starts
+  # the same published images but feeds them nothing, so a renamed sample file or a changed
+  # query would have shown a newcomer an empty answer under "TOP ATTACK PATH" with every
+  # check green. It runs here as written, and fails unless the seed turns into a route.
+  # On a release pull request the images it names do not exist yet; compose then builds
+  # them from this tree, which is slower and checks the same thing.
+  demo:
+    name: Quick start (make demo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      - name: Pull Docker Hub images through mirror.gcr.io
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-docker-mirror.sh" "$GITHUB_WORKSPACE/docker-compose.yml"
+      - name: make demo
+        run: make demo
+      - name: The dashboard serves the routes, through its own proxy
+        run: |
+          set -euo pipefail
+          curl -fsS -o /dev/null http://localhost:3000/
+          n=$(curl -fsS -X POST http://localhost:3000/graphql -H 'Content-Type: application/json' \
+                -d '{"query":"{ attackPaths(limit:50){ id } }"}' | jq '.data.attackPaths | length')
+          echo "attack paths through the dashboard: $n"
+          test "$n" -ge 1
+      - name: The backend's log, if it failed
+        if: failure()
+        run: docker compose logs backend | tail -80
+
+  # deploy/aws holds the read-only role the AWS connector reads with, as CloudFormation and
+  # as a Terraform module - files nothing else in the build touches, so a typo in either
+  # would ship and surface only in someone's account. Both are checked here; a live deploy
+  # in a real account is not, because it needs one.
+  aws-templates:
+    name: AWS role templates
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+
+      - run: python3 -m pip install --quiet --require-hashes -r scripts/requirements-cfn.txt
+
+      - name: CloudFormation (cfn-lint)
+        run: cfn-lint deploy/aws/readonly-role.cfn.yaml
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      - name: Terraform (fmt, validate)
+        working-directory: deploy/aws/terraform
+        run: |
+          terraform fmt -check -diff
+          terraform init -backend=false -input=false
+          terraform validate
 
   frontend:
     name: Frontend (React)
@@ -339,7 +490,7 @@ jobs:
         run: |
           version="$(bash ../scripts/node-image.sh --version)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.node.outputs.version }}
           cache: npm
@@ -418,7 +569,7 @@ jobs:
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: "1.26.8"
+          go-version: "1.27.3"
           cache-dependency-path: backend/go.sum
 
       # --ignore our own module: its licence is this repository's (LICENSE lives at the
@@ -443,7 +594,7 @@ jobs:
         run: |
           version="$(bash scripts/node-image.sh --version)"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ steps.node.outputs.version }}
           cache: npm
@@ -462,16 +613,38 @@ jobs:
             --production --excludePrivatePackages \
             --onlyAllow "${ALLOWED_NPM}" --summary
 
+  # Our own licensing, file by file, as https://reuse.software reads it: REUSE.toml says who
+  # holds each file's copyright and under which licence it is offered, and LICENSES/ holds the
+  # text of every licence it names. A licence named without its text, or an SPDX header that
+  # does not parse, fails here. A file from elsewhere does not: the first annotation covers
+  # every file as the project's own, so naming its real author is the review's job.
+  reuse:
+    name: Licensing (REUSE)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # From PyPI, hash-pinned, rather than fsfe/reuse-action: that action builds a container
+      # from Docker Hub before the first step, where no mirror reaches (requirements-reuse.txt).
+      - run: python3 -m pip install --quiet --require-hashes -r scripts/requirements-reuse.txt
+      - run: reuse lint
+
   images:
     name: Container images (Trivy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+      # Docker Hub rate-limits the runners' shared addresses ("429 Too Many Requests"); its
+      # images come through Google's mirror instead, by the digests they are pinned to.
+      - name: Pull Docker Hub images through mirror.gcr.io
+        # By path from the workspace: some jobs run their steps from backend/.
+        run: bash "$GITHUB_WORKSPACE/scripts/ci-docker-mirror.sh" "$GITHUB_WORKSPACE/backend/Dockerfile" "$GITHUB_WORKSPACE/frontend/Dockerfile" "$GITHUB_WORKSPACE/deploy/postgres/Dockerfile" "$GITHUB_WORKSPACE/deploy/caddy/Dockerfile"
       - name: Build images
         run: |
           docker build -t perspectivegraph-backend:ci backend
           docker build -t perspectivegraph-dashboard:ci frontend
           docker build -t perspectivegraph-postgres:ci deploy/postgres
+          docker build -t perspectivegraph-caddy:ci deploy/caddy
       # Installed from a SHA-pinned action rather than curling an install script off
       # a moving branch and piping it to a shell. The old form re-fetched whatever
       # `main` happened to contain at that moment and executed it in CI: a scanner
@@ -488,6 +661,6 @@ jobs:
       # here now, so it is scanned here now.
       - name: Scan images
         run: |
-          for img in perspectivegraph-backend:ci perspectivegraph-dashboard:ci perspectivegraph-postgres:ci; do
+          for img in perspectivegraph-backend:ci perspectivegraph-dashboard:ci perspectivegraph-postgres:ci perspectivegraph-caddy:ci; do
             trivy image --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$img"
           done

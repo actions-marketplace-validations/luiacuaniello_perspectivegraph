@@ -12,6 +12,7 @@
   <a href="https://github.com/luiacuaniello/perspectivegraph/actions/workflows/ci.yml"><img src="https://github.com/luiacuaniello/perspectivegraph/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <a href="https://github.com/luiacuaniello/perspectivegraph/releases"><img src="https://img.shields.io/github/v/release/luiacuaniello/perspectivegraph?sort=semver" alt="Latest release"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License: Apache 2.0"></a>
+  <a href="https://scorecard.dev/viewer/?uri=github.com/luiacuaniello/perspectivegraph"><img src="https://api.scorecard.dev/projects/github.com/luiacuaniello/perspectivegraph/badge" alt="OpenSSF Scorecard"></a>
   <a href="https://demo.a3thinker.it"><img src="https://img.shields.io/website?url=https%3A%2F%2Fdemo.a3thinker.it&label=live%20demo&up_message=online&down_message=offline" alt="Live demo status"></a>
 </p>
 
@@ -31,6 +32,7 @@ chain and the fix it generates → whether the scores can be trusted. Sample sca
 seeded verdicts, not a real environment.*
 
 - **[See it running](https://demo.a3thinker.it)** - the same dashboard, published read-only. Nothing to install.
+- **[Read the documentation](https://docs.a3thinker.it)** - the manual, one page per subject, with search.
 - **[Check your own AWS account](#check-your-own-account-in-30-seconds)** - one read-only command, no deployment.
 - **[Put it on your pull requests](#block-the-pull-request-that-opens-the-path)** - ten lines of YAML.
 
@@ -60,7 +62,7 @@ is signed with cosign and carries SLSA provenance, and two commands
 
 Add `-compare` and it also runs the engine over the same account, **exiting non-zero where the
 two disagree**. That is how the engine's
-[first real false positive](docs/MANUAL.md#the-engines-first-demonstrated-false-positive---found-then-closed)
+[first real false positive](docs/manual/accuracy.md#the-engines-first-demonstrated-false-positive---found-then-closed)
 was found, and how it stays fixed. If it disagrees on yours,
 [report it](https://github.com/luiacuaniello/perspectivegraph/issues/new?template=engine-vs-aws.yml): no report is more useful. From here, [how to evaluate this](docs/EVALUATION.md) walks to a
 verdict on your own estate in stages that each end in an answer.
@@ -82,7 +84,15 @@ On Kubernetes, the chart is an
 
 ```bash
 helm install perspectivegraph oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
-  --version 1.20.0 # x-release-please-version
+  --version 1.39.2 # x-release-please-version
+```
+
+On one machine - a VM with Docker and a DNS name - one command sets up TLS, generated
+credentials, an authenticated bus and daily backups, and starts it:
+[production on one machine](docs/manual/single-vm.md).
+
+```bash
+make prod-init DOMAIN=perspectivegraph.example.com
 ```
 
 The chart and the three images it runs (`ghcr.io/luiacuaniello/perspectivegraph`, `-dashboard`
@@ -98,12 +108,15 @@ is - so a lower-scoring route can outrank a higher-scoring one.
 
 | | |
 |---|---|
-| ![Attack path detail](docs/screenshot-paths.png) | ![Score calibration](docs/screenshot-trust.png) |
-| Every hop, its probability, where that probability came from, and the ATT&CK technique. | Whether the engine's own scores held up against recorded outcomes. |
+| ![Attack path detail](docs/screenshot-paths.png) | ![Score accuracy](docs/screenshot-accuracy.png) |
+| Why the route is P1, one probability with its range, and every hop with what it lets the attacker do and where its probability came from. | Whether the engine's own scores held up against recorded outcomes - and whether there are enough of them to say. |
 
-*The screenshots are `make demo` with **seeded** verdicts, which is why the calibration panel
-gives one ("underconfident": across 14 outcomes generated to exercise it, the engine predicted 60%
-where 71% held up). A fresh install and the [public demo](https://demo.a3thinker.it) report
+*The screenshots are `make demo` with **seeded** verdicts: `make seed-validation` records
+synthetic outcomes on part of the routes, the way a BAS run tests part of an estate, which is why
+the calibration panel has something to show - and why it still says **not enough outcomes yet**:
+the handful it records is far short of the 30 a verdict needs. The counts in the pictures are
+those of the release they were taken on; the sample data has grown since, so yours differ by a
+route or two. A fresh install and the [public demo](https://demo.a3thinker.it) report
 **insufficient data** instead, until real outcomes exist. The public demo runs on one free VM, so
 treat it as best-effort.*
 
@@ -129,16 +142,24 @@ scan, and answers in-process with the same engine:
     report: trivy.json
 ```
 
-The check goes red when *this commit* puts a sensitive asset within reach, not when it adds a
-critical CVE: a critical on a host nothing routes to does not fail the build, and a medium on a
-container that now reaches the production database does. It also has a third outcome, because a
-pipeline whose scan never arrived must not get the same green tick as one that is clean:
+The check goes red when *this change* opens a route to a sensitive asset - or makes one
+likelier - not when it adds a critical CVE: a critical on a host nothing routes to does not fail
+the build, and a medium on a container that now reaches the production database does. Routes that
+were there before the change do not count, even when they run through what it touches: the scan
+is applied to a copy of the estate and compared with it, and nothing is written. It also has a
+third outcome, because a pipeline whose scan never arrived must not get the same green tick as
+one that is clean:
 
 | Verdict | Exit | Meaning |
 | --- | --- | --- |
-| `clean` | 0 | The engine analysed this commit and found no path through it |
-| `blocked` | 1 | Critical attack paths run through it - the check names them |
+| `clean` | 0 | The engine analysed this change: it opens or worsens no critical path |
+| `blocked` | 1 | It opens or worsens critical attack paths - the check names them |
 | `unknown` | 2 | **Nobody analysed it.** The scan, the ingest or the SHA is wrong |
+
+A Terraform plan goes through the same gate before anything is deployed: `source: terraform`
+with the output of `terraform show -json`, judged on its own or against the live estate. A
+security group rule, a policy attachment or a bucket policy that opens a route fails the check
+in the pull request that writes it - see [Terraform plans](docs/manual/ci-gate.md#the-merge-gate-github-action-cli-and-trivy-plugin).
 
 Outside GitHub Actions it is one command, and it installs as a Trivy plugin too:
 
@@ -157,7 +178,7 @@ trivy image -f json myapp:pr-42 | trivy perspectivegraph gate -local -aws-region
 > **On a public repository**, a blocked check prints the route (real asset names, the CVE, the
 > sensitive asset) into a public job log. Use `soft-fail` and post the detail somewhere private.
 
-The [manual](docs/MANUAL.md#the-merge-gate-github-action-cli-and-trivy-plugin) covers the rest:
+The [manual](docs/manual/ci-gate.md#the-merge-gate-github-action-cli-and-trivy-plugin) covers the rest:
 pointing the action at a deployed engine, gating rendered manifests, a pre-collected estate,
 rolling the gate out, and every input in [`action.yml`](action.yml).
 
@@ -176,7 +197,7 @@ Eight tools, every one **read-only** and declared so on the wire. The one worth 
 is `simulate_fix`: it re-runs the simulation with the given edges cut and reports what actually
 changes. The server is in the official [MCP Registry](https://registry.modelcontextprotocol.io)
 and on [Glama](https://glama.ai/mcp/servers/luiacuaniello/perspectivegraph); the tools and the
-client configuration are in the [manual](docs/MANUAL.md#letting-an-agent-query-it-mcp).
+client configuration are in the [manual](docs/manual/ai-and-mcp.md#letting-an-agent-query-it-mcp).
 
 [![PerspectiveGraph MCP server on Glama](https://glama.ai/mcp/servers/luiacuaniello/perspectivegraph/badges/score.svg)](https://glama.ai/mcp/servers/luiacuaniello/perspectivegraph)
 
@@ -190,10 +211,11 @@ client configuration are in the [manual](docs/MANUAL.md#letting-an-agent-query-i
 calibrated.** Nobody has run this over a real estate, tested the paths it surfaced and fed the
 verdicts back: the machinery for that loop is built and tested, the loop is not closed. So read a
 score as what the model believes and how sure it says it is, not as a measured frequency. Use it
-to find and cut routes; don't put its percentage in front of a board.
+to find and cut routes; don't put its percentage in front of a board. If you run it over yours,
+[tell us how it went](https://github.com/luiacuaniello/perspectivegraph/discussions/286).
 [Positioning](docs/POSITIONING.md) spells out what is and isn't claimed.
 
-**What is measured today, as of v1.20.0.** <!-- x-release-please-version -->
+**What is measured today, as of v1.39.2.** <!-- x-release-please-version -->
 `make bench-cloudgoat` grades the engine in CI on four
 [CloudGoat-shaped scenarios](backend/testdata/cloudgoat/README.md):
 
@@ -209,18 +231,27 @@ regression gate rather than a measure of accuracy on your estate. On real AWS,
 `make reachability-lab-aws` checks exposure the same way for free, and `make redteam-aws` grades
 the engine's escalation claims against AWS's own policy evaluator. That grading has already
 caught one false positive, a permissions boundary the engine ignored; it is fixed, and
-`make boundary-lab-aws` fails whenever the engine and AWS disagree.
+`make boundary-lab-aws` fails whenever the engine and AWS disagree. `make entrypoints-lab-aws`
+puts bucket policies and function URLs to AWS the same way; its first run caught four errors,
+also fixed. `make public-access-lab-aws` does it, for free, for Block Public Access set on the
+whole account, and `make terraform-lab-aws` applies the Terraform plans the merge gate judged and
+asks the internet whether each one opened a way in. Each of these labs writes what it found
+into the build, and the dashboard's Accuracy page shows it under *Checked against AWS*: every
+question, AWS's answer, the engine's, and the version it was asked of.
 
-- **Clouds.** AWS is live and verified against a real account, cross-account `AssumeRole`
-  included. Azure is fixtures only, and there is no GCP connector.
+- **Clouds.** AWS is live and verified against a real account; reading several accounts in
+  one pass is exercised on fixtures, not yet against real ones. Azure is fixtures only, and
+  there is no connector for GCP or for OpenStack: the [roadmap](ROADMAP.md#coverage) says
+  what is planned for each.
 - **Interface.** The GraphQL schema is frozen and drift-guarded, so a breaking change comes with
   a major version, never in a patch: [API stability](docs/API-STABILITY.md).
 - **Deployment.** The backend is distroless and non-root on a read-only root filesystem, the
   images are pinned by digest, and under Helm every workload meets the `restricted` Pod Security
   Standard, asserted in CI. The compose defaults are open on purpose; `PG_ENV=production` refuses
-  to start unless API and ingest are authenticated. A real rollout needs more (external
-  PostgreSQL with AGE, TLS, backups, `TRUSTED_PROXY_CIDRS` behind a proxy): the
-  [operations runbook](docs/OPERATIONS.md) lists it.
+  to start unless API and ingest are authenticated. A real rollout needs more (TLS, backups,
+  `TRUSTED_PROXY_CIDRS` behind a proxy, a database you can fail over): on one machine
+  `make prod-init` does the first three, and CI restores one of its backups on every change;
+  the [operations runbook](docs/OPERATIONS.md) lists the rest.
 - **Support.** The newest release only, with a clock on security fixes (Critical 7 days, High
   30): [SUPPORT.md](SUPPORT.md).
 - **Telemetry.** None. Out of the box it opens no outbound connection; GitHub, the AI assistant
@@ -234,6 +265,8 @@ caught one false positive, a permissions boundary the engine ignored; it is fixe
 
 ## Documentation
 
+- [Concepts in plain words](docs/manual/concepts.md) - route, score, interval, priority, outcome, calibration: the words the dashboard uses
+- [Connect your own infrastructure](docs/manual/connect-your-own.md) - your AWS accounts and Kubernetes clusters, from a laptop, one machine, EKS or any cluster
 - [Manual](docs/MANUAL.md) - architecture, scoring, every integration, deployment, and the runbook for your own environment
 - [Evaluation](docs/EVALUATION.md) - trying it on your own estate, in stages that each end in an answer
 - [Positioning](docs/POSITIONING.md) - what is claimed, what is **not**, and how to check
@@ -243,4 +276,5 @@ caught one false positive, a permissions boundary the engine ignored; it is fixe
 
 ## License
 
-[Apache License 2.0](LICENSE).
+[Apache License 2.0](LICENSE). Licensing is declared for every file, in the form
+[REUSE](https://reuse.software) defines, and checked in CI: [REUSE.toml](REUSE.toml).

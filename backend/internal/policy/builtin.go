@@ -5,7 +5,7 @@ import "github.com/luiacuaniello/perspectivegraph/pkg/ontology"
 // Builtins returns the default architectural invariants PerspectiveGraph ships with.
 // Teams extend these with their own via Engine.Add.
 func Builtins() []Invariant {
-	internetExposed := func(n ontology.Node) bool { return n.Bool(ontology.PropInternetExposed) }
+	internetExposed := func(n ontology.Node) bool { return n.InternetExposed() }
 	crownJewel := func(n ontology.Node) bool { return n.Bool(ontology.PropCrownJewel) }
 
 	return []Invariant{
@@ -42,8 +42,20 @@ func Builtins() []Invariant {
 			Source:      nil, // node-level
 			Target: func(n ontology.Node) bool {
 				return (n.Label == ontology.LabelBucket || n.Label == ontology.LabelDatabase) &&
-					n.Bool(ontology.PropInternetExposed)
+					n.InternetExposed()
 			},
+		},
+		{
+			// The path invariant above never fires on a sensitive asset that is itself
+			// exposed: a path needs an edge, and there is none to cross. Open to anyone,
+			// it is compromised and listed as a direct-access path; merely reachable - an
+			// internet-facing VM or database behind a password - it counts as compromised
+			// only when an edge reaches it, so this is where it is reported.
+			ID:          "no-internet-exposed-sensitive-asset",
+			Description: "A sensitive asset must not itself be reachable from the internet.",
+			Severity:    "CRITICAL",
+			Source:      nil, // node-level
+			Target:      func(n ontology.Node) bool { return internetExposed(n) && crownJewel(n) },
 		},
 	}
 }

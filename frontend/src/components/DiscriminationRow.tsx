@@ -9,11 +9,14 @@ import InfoTip from "./InfoTip";
 // It lives in its own component so CalibrationPanel's own test (issue #97) stays the
 // scoped task it was written as.
 
+// Neutral for a clean result, amber for an uncertain one, red only for an order that points
+// the wrong way - the one reading here that is urgent, because it sends people to the wrong
+// routes first. Green is kept for "defended or fixed" across the dashboard.
 const STYLE: Record<string, { label: string; cls: string }> = {
-  discriminates: { label: "discriminates", cls: "bg-emerald-500/15 text-emerald-700" },
-  "indistinguishable-from-chance": { label: "not shown to beat chance", cls: "bg-amber-500/15 text-amber-700" },
+  discriminates: { label: "discriminates", cls: "bg-slate-500/15 text-slate-800" },
+  "indistinguishable-from-chance": { label: "not shown to beat chance", cls: "bg-amber-500/15 text-amber-800" },
   inverted: { label: "inverted", cls: "bg-red-500/15 text-flag" },
-  "insufficient-data": { label: "insufficient data", cls: "bg-slate-400/15 text-slate-500" },
+  "insufficient-data": { label: "insufficient data", cls: "bg-slate-500/10 text-slate-600" },
 };
 
 // A judged verdict earns full-strength figures. Below the per-class floor the AUC is
@@ -38,9 +41,18 @@ function Line({ label, tip, d, emptyText }: { label: string; tip: string; d?: Di
             title={`${d.positives} confirmed · ${d.negatives} refuted · 95% interval ${d.aucLow?.toFixed(2)}–${d.aucHigh?.toFixed(2)}`}
           >
             AUC {d.auc!.toFixed(2)}{" "}
-            <span className="text-muted">
-              [{d.aucLow?.toFixed(2)}–{d.aucHigh?.toFixed(2)}]
-            </span>
+            {JUDGED.has(d.verdict) ? (
+              <span className="text-muted">
+                [{d.aucLow?.toFixed(2)}–{d.aucHigh?.toFixed(2)}]
+              </span>
+            ) : (
+              // Below the floor the interval is the least trustworthy thing on the row: an
+              // approximation that reads tightest exactly when the sample is smallest
+              // ("[0.95–1.00]" on fourteen verdicts). The counts say what the figure rests on.
+              <span className="text-muted">
+                from {d.positives} confirmed · {d.negatives} refuted
+              </span>
+            )}
           </span>
           <span className={`rounded-md px-1.5 py-0.5 text-[12px] font-medium ${style.cls}`}>{style.label}</span>
         </>

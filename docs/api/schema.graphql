@@ -3,6 +3,7 @@ type AttackPath {
   confidenceLabel: String
   correlatedHops: Boolean
   detections: [Detection]
+  directAccess: Boolean
   firstSeen: String
   id: String
   mixtureScore: Float
@@ -12,6 +13,7 @@ type AttackPath {
   priority: Float
   priorityFactors: [String]
   priorityLabel: String
+  priorityReason: String
   profileScores: [ProfileScore]
   remediations: [Remediation]
   reopens: Int
@@ -111,6 +113,12 @@ type CrownJewelRisk {
   name: String
 }
 
+type CutEdge {
+  from: String
+  to: String
+  type: String
+}
+
 type Detection {
   content: String
   filename: String
@@ -197,6 +205,30 @@ type IngestSource {
   stale: Boolean
 }
 
+type LabCheck {
+  aws: String
+  case: String
+  engine: String
+  note: String
+  question: String
+  referee: String
+  verdict: String
+}
+
+type LabRun {
+  agreed: Int
+  checks: [LabCheck]
+  command: String
+  cost: String
+  disagreed: Int
+  engine: String
+  lab: String
+  ranAt: String
+  region: String
+  title: String
+  unsettled: Int
+}
+
 type Node {
   account: String
   classification: String
@@ -204,6 +236,8 @@ type Node {
   crownJewelBasis: String
   cvss: Float
   epss: Float
+  exposedManagementPorts: String
+  exposedPorts: String
   id: String!
   internetExposed: Boolean
   kev: Boolean
@@ -268,7 +302,7 @@ type ProfileScore {
 type Query {
   aiEnabled: Boolean
   applications: [String]
-  attackPaths(app: String, limit: Int): [AttackPath]
+  attackPaths(app: String, limit: Int, offset: Int): [AttackPath]
   calibration: Calibration
   calibrationTrend(points: Int): [CalibrationTrendPoint]
   graph(app: String, limit: Int, offset: Int): GraphView
@@ -277,6 +311,7 @@ type Query {
   ingestCoverage: [IngestSource]
   invariantViolations: [PolicyViolation]
   kShortestPaths(from: String, k: Int, target: String!): [AttackPath]
+  labRuns: [LabRun]
   posture: Posture
   prVerdict(sha: String!, slug: String!): PRVerdict
   remediationPlan(app: String, title: String): [Fix]
@@ -298,6 +333,7 @@ type ReliabilityBin {
 
 type Remediation {
   content: String
+  cut: CutEdge
   filename: String
   kind: String
   rationale: String
@@ -306,6 +342,7 @@ type Remediation {
 }
 
 type RemediationEffect {
+  expectedReduction: Float
   pathsAfter: Int
   pathsBefore: Int
   pathsEliminated: Int
@@ -383,6 +420,7 @@ type WhatIfResult {
   afterRisk: RiskSimulation
   before: [AttackPath]
   beforeRisk: RiskSimulation
+  expectedReduction: Float
   removedEdges: Int
   riskReduction: Float
 }

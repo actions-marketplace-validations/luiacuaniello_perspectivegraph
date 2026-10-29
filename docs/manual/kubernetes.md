@@ -1,0 +1,354 @@
+# Deploy to Kubernetes
+
+*Part of the [PerspectiveGraph manual](../MANUAL.md).* The Helm chart, a local cluster with the SSO demo, and hardening a real deployment.
+
+A Helm chart bundles the backend, dashboard, Postgres+AGE, and NATS. It is published as
+an OCI artifact, so installing it needs no clone of this repository - and gives you a
+version you can pin, verify and name in a change record:
+
+```bash
+# Install a pinned release straight from the registry
+helm install perspective oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
+  --set github.token=$GITHUB_TOKEN \
+  --set opensearch.url="" \
+  --version 1.39.2 # x-release-please-version
+```
+
+The chart is cosign-signed like the images. Verify it before it templates anything into
+your cluster - a chart is a description of what will run with cluster credentials, so an
+unverified one is a larger hole than an unverified image:
+
+```bash
+cosign verify \
+  --certificate-identity-regexp 'https://github.com/luiacuaniello/perspectivegraph/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/luiacuaniello/charts/perspectivegraph:1.39.2 # x-release-please-version
+```
+
+The chart declares `kubeVersion: >= 1.21.0-0` (the floor is `policy/v1`
+PodDisruptionBudget), so an older cluster is refused at install time rather than halfway
+through. Working from a git checkout instead is still supported everywhere below - swap
+the `oci://…` reference for `deploy/helm/perspectivegraph`:
+
+```bash
+helm install perspective deploy/helm/perspectivegraph \
+  --set github.token=$GITHUB_TOKEN
+```
+
+Bring your own Postgres/NATS by disabling the bundled ones and pointing the chart at
+the external endpoints. Read
+[the database matrix](../OPERATIONS.md#3-the-database-postgresql--apache-age) before you
+pick one: Apache AGE is a managed offering on Azure only, so on AWS and GCP "external"
+means an instance you run - or one the chart hands to CloudNativePG, the
+[next section](#a-production-database-cloudnativepg).
+
+```bash
+helm install perspective deploy/helm/perspectivegraph \
+  --set postgres.enabled=false \
+  --set postgres.externalHost=my-postgres.example.internal \
+  --set postgres.auth.user=perspective --set postgres.auth.password=… \
+  --set nats.enabled=false \
+  --set nats.externalUrl=nats://my-nats.example.internal:4222
+```
+
+The external Postgres must have the [Apache AGE](https://age.apache.org/)
+extension installed and the graph created (see
+[`deploy/postgres/init-age.sql`](../../deploy/postgres/init-age.sql)). All knobs:
+[`deploy/helm/perspectivegraph/values.yaml`](../../deploy/helm/perspectivegraph/values.yaml).
+
+## A production database: CloudNativePG
+
+The bundled Postgres is one pod: no replica, no TLS, no backups. On AWS and GCP no managed
+PostgreSQL offers Apache AGE, so the chart can hand the database to
+[CloudNativePG](https://cloudnative-pg.io), the Kubernetes operator for PostgreSQL. The
+database stays inside your cluster, and the operator runs it:
+
+- **A primary and replicas, with failover.** `instances` (default 2) is one primary plus
+  streaming replicas. When the primary is lost, the operator promotes a replica and moves
+  the `-rw` Service the backend connects through; the backend reconnects on its own.
+  Measured on kind with the primary killed: the replica was promoted in 21 seconds and the
+  next write landed 4 seconds later, with no backend restart. A primary shut down politely
+  is another matter - the operator waits up to three minutes for clients to disconnect, and
+  the backend's pool does not - so for maintenance promote a replica first
+  (`kubectl cnpg promote`), rather than deleting the primary's pod.
+- **TLS the backend verifies.** The connection uses `sslmode=verify-full` against the CA
+  the operator issues, mounted into the backend: a pod that took over the address could
+  not pose as the database.
+- **Backups with point-in-time recovery**, through the operator's Barman Cloud plugin: the
+  WAL is archived continuously to object storage and a base backup is taken on a schedule,
+  so a restore can stop at any moment rather than at the last backup.
+- **The engine's own requirements, set for you.** AGE is preloaded, because the backend's
+  role is not a superuser and cannot load it; the bootstrap creates the extension and the
+  grants [the database section](../OPERATIONS.md#what-the-engine-needs-of-it) lists, and the
+  backend creates its graph, so it owns the schema.
+
+The operator runs **the same image as the bundled database**,
+`ghcr.io/luiacuaniello/perspectivegraph-postgres`: PostgreSQL 17 and Apache AGE on Alpine,
+rebuilt every release, with no known vulnerability - no finding of any severity, fixed or
+not, when the 1.35.1 image was scanned. The operator does not need its own Debian images,
+only the PostgreSQL binaries on the PATH, so there is no second image to trust. The chart
+runs it as the image's postgres user (uid and gid 999, `image.uid`/`image.gid`), and names it
+through an `ImageCatalog` that states the major version (`image.major`, 17): the operator
+otherwise reads the version off the tag, and this image is tagged with the release.
+
+**1. Install the operator**, once per cluster:
+
+```bash
+kubectl apply --server-side -f \
+  https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v1.30.1/cnpg-1.30.1.yaml
+```
+
+**2. For backups**, install the [Barman Cloud plugin](https://cloudnative-pg.io/plugin-barman-cloud/)
+next to it (it needs cert-manager) and describe the bucket in an `ObjectStore`. On EKS the
+database pods can write to S3 with an IAM role instead of keys:
+
+```yaml
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: perspectivegraph-backups
+spec:
+  retentionPolicy: "30d"
+  configuration:
+    destinationPath: s3://my-bucket/perspectivegraph
+    s3Credentials:
+      inheritFromIAMRole: true
+    wal:
+      compression: gzip
+```
+
+**3. Install the chart** with the database handed over:
+
+```bash
+helm install perspective oci://ghcr.io/luiacuaniello/charts/perspectivegraph \
+  -f values-production.yaml \
+  --set postgres.cloudnativepg.enabled=true \
+  --set postgres.cloudnativepg.backup.objectStore=perspectivegraph-backups \
+  --set-string 'postgres.cloudnativepg.serviceAccountAnnotations.eks\.amazonaws\.com/role-arn=arn:aws:iam::111111111111:role/perspectivegraph-backups'
+```
+
+`postgres.cloudnativepg.enabled` replaces the bundled pod whatever `postgres.enabled` says,
+and the backend's credentials come from the Secret the operator generates, so neither
+`postgres.auth.password` nor a `POSTGRES_PASSWORD` in `secrets.existingSecret` is used.
+`instances`, `storage.size`, `storage.storageClass`, `resources` and `parameters` size it;
+[`values.yaml`](../../deploy/helm/perspectivegraph/values.yaml) has every value. With
+`networkPolicy.enabled`, the database pods accept only the backend, each other
+(replication) and the operator's namespace (`operatorNamespace`, default `cnpg-system`).
+Without `backup.objectStore` there are no backups, and the release notes say so.
+
+**4. Restore** by bootstrapping a new cluster from the `ObjectStore`
+([recovery](https://cloudnative-pg.io/docs/1.30/recovery/)). Two lines matter beyond the
+operator's own example: the new cluster must preload AGE, and must run as the image's uid,
+or it starts but cannot read what it restored. `serverName` is the cluster the backups came
+from:
+
+```yaml
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: perspective-restored
+spec:
+  instances: 1
+  imageCatalogRef: {apiGroup: postgresql.cnpg.io, kind: ImageCatalog, name: perspective-perspectivegraph-pg, major: 17}
+  postgresUID: 999
+  postgresGID: 999
+  postgresql:
+    shared_preload_libraries: [age]
+  storage: {size: 10Gi}
+  bootstrap:
+    recovery:
+      source: origin
+      # recoveryTarget: {targetTime: "2026-10-09T13:00:00Z"}   # stop at a moment instead
+  externalClusters:
+    - name: origin
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: perspectivegraph-backups
+          serverName: perspective-perspectivegraph-pg
+```
+
+Checked end to end on kind, with an S3-compatible store standing in for the bucket: the
+chart's schedule took the first base backup and archived the WAL continuously; a write made
+after that backup came back in a cluster restored from the store - so the WAL is replayed,
+not just the backup copied - with AGE loaded and the graph's schema still the backend's.
+
+**What stays yours:** the storage class and size, upgrading the operator, the bucket and its
+retention, and rehearsing that restore. The graph itself can be rebuilt by re-ingesting the
+feeds; with `GOVERNANCE_BACKEND=postgres` the suppressions, tickets, history and audit chain
+live in this database too, and those cannot.
+
+`DATABASE=cloudnativepg bash scripts/chart-install.sh` checks all of this on a throwaway kind
+cluster, and CI runs it on every pull request: it installs the operator, waits for a
+primary and a replica, checks that the backend's session is encrypted and that it owns its
+graph, then deletes the primary and checks that a write still reaches the graph through the
+replica the operator promoted.
+
+## Local cluster (Docker Desktop / kind / minikube) + SSO demo
+
+On a local cluster the images aren't on a registry, so build them and **load them
+into the cluster** (its container runtime doesn't share the host Docker daemon):
+
+```bash
+make up-full && make down   # quickest way to build perspectivegraph-{backend,dashboard}:local
+
+# Load into the cluster's containerd:
+#   Docker Desktop:  docker save <img> | docker exec -i desktop-control-plane ctr -n k8s.io images import -
+#   kind:            kind load docker-image <img>
+#   minikube:        minikube image load <img>
+```
+
+Then install pointing at the local images (and, to try the **SSO login** end-to-end
+against a bundled demo Keycloak, with the SSO overlay):
+
+```bash
+kubectl create namespace perspectivegraph
+kubectl -n perspectivegraph create configmap keycloak-realm \
+  --from-file=realm-demo.json=deploy/keycloak/realm-demo.json
+kubectl -n perspectivegraph apply -f deploy/keycloak/k8s-keycloak-demo.yaml
+
+helm install perspectivegraph deploy/helm/perspectivegraph \
+  -n perspectivegraph -f deploy/helm/perspectivegraph/values-sso-demo.yaml
+
+# Reach it (each in its own terminal): Keycloak for the browser, the dashboard,
+# and the ingest port so `make seed` (which posts to localhost:8081) works.
+kubectl -n perspectivegraph port-forward svc/keycloak 8088:8080
+kubectl -n perspectivegraph port-forward svc/perspectivegraph-perspectivegraph-frontend 3000:80
+kubectl -n perspectivegraph port-forward svc/perspectivegraph-perspectivegraph-backend 8081:8081
+# open http://localhost:3000 → "Sign in with SSO" → demo / demo
+make seed   # and make seed-discovery - they post to localhost:8081 (the ingest port)
+```
+
+Full walk-through (incl. why the OIDC URLs differ) in
+[Trying SSO end-to-end on a laptop](security.md#trying-sso-end-to-end-on-a-laptop-the-bundled-keycloak).
+Demo only: locally-built images + Keycloak in `start-dev`.
+
+## Hardening a real deployment (beyond a trusted cluster)
+
+The default chart runs **unauthenticated with in-memory governance** - fine for a
+demo inside a trusted cluster, but this tool is a *map of how to attack the org*,
+so anything reachable beyond that boundary must turn the controls on. The chart
+surfaces them as first-class values:
+
+```bash
+helm install perspective deploy/helm/perspectivegraph \
+  --set auth.apiTokens="$(openssl rand -hex 16):admin" \   # bearer auth on the API (token:role[:tenant])
+  --set ingest.hmacSecret="$(openssl rand -hex 16)" \      # scanners must sign ingest bodies
+  --set persistence.enabled=true \                         # PVC for the governance stores + audit log
+  --set graph.ttl=168h \                                   # prune stale assets (phantom paths)
+  --set networkPolicy.enabled=true                         # only the backend reaches NATS and Postgres
+```
+
+- **`auth.apiTokens` / `auth.oidc.*`** - without a token the API is open; set
+  static tokens and/or OIDC (`issuer`/`audience`/`jwksUrl`). `auth.apiRateRps` /
+  `auth.ingestRateRps` cap per-IP request rates (0 disables).
+- **`ingest.hmacSecret` / `ingest.hmacSecrets`** - HMAC-sign ingestion so nobody
+  can forge scanner data on the open ingest port.
+- **`persistence.enabled`** - mounts a ReadWriteOnce PVC so suppressions, tickets,
+  red-team validations, MTTR/posture history and the **tamper-evident audit log**
+  survive restarts (in-memory and lost otherwise). `GOVERNANCE_BACKEND=postgres` moves
+  **suppressions, tickets, history, validations and the KEV holdout** into the database,
+  where every replica reads the same rows. The audit log stays a single-writer hash
+  chain, so the chart **refuses to render with `backend.replicas > 1`** while persistence
+  is on - scale-out would split-brain it.
+- **`secrets.generate`** - the chart fills every credential left empty with a generated one
+  and keeps it across upgrades, the way it keeps the database and NATS passwords: an admin
+  API token (unless OIDC is set), the ingest HMAC secret, the at-rest encryption key and the
+  export signing key. With it, `-f values-production.yaml --set secrets.existingSecret=""
+  --set secrets.generate=true` installs a production instance with no Secret prepared by
+  hand - plus the database's password (`postgres.auth.password`), which only the database
+  knows, or `postgres.cloudnativepg.enabled=true`, whose operator generates its own. The
+  release notes print how to read the token and the ingest secret back. Back
+  the Secret up: the encryption key in it is the only key to the encrypted stores. It is for
+  `helm install` and `helm upgrade` only - a render without the cluster (`helm template`,
+  Argo CD, Flux) draws new values every time, so there keep the credentials in
+  `secrets.existingSecret`.
+- **The backend's own service account** (`serviceAccount`), with no Kubernetes API token
+  mounted - nor in any other pod of the chart, since none of them calls the API. A cloud
+  role is bound to it and to nothing else: on EKS, the read-only role the AWS connector
+  reads the account with, through an EKS Pod Identity association on
+  `<release>-perspectivegraph-backend` or an IRSA annotation in `serviceAccount.annotations`
+  ([the role](integrations.md#the-read-only-role)).
+  The one exception is the Kubernetes connector (`connectors.enabled={kubernetes}`), which
+  reads the cluster through its API: then the backend alone mounts a token, and the chart
+  grants its account `get`/`list` on what the connector reads - never secrets, nothing that
+  writes ([the Kubernetes connector](integrations.md#kubernetes-the-cluster-the-engine-runs-in)).
+- **The bus and the database authenticate on their own.** The bundled NATS requires a
+  user and a password the chart generates into a Secret and hands the backend, so a pod
+  that can reach port 4222 cannot publish events past the ingest signature check. The
+  bundled Postgres gets a random password on install (an existing install keeps its
+  own). Both are kept across `helm upgrade`; a `helm template` render (Argo CD, Flux)
+  cannot read the cluster, so there set `postgres.auth.password` and
+  `nats.auth.password` - or bring `secrets.existingSecret` and `nats.auth.existingSecret`.
+- **`networkPolicy.enabled`** - only the backend may open a connection to the bundled
+  NATS and Postgres; `networkPolicy.backendFrom` (the ingress controller's namespace,
+  say) also closes the backend to the rest of the cluster. It needs a CNI that enforces
+  NetworkPolicy - which is why NATS authenticates too.
+- **`nats.persistence.enabled`** (default on) keeps the event stream on a volume, so a
+  NATS restart does not lose queued events, dead letters, or the record a merge gate
+  waits on.
+- The release prints a ⚠ in `NOTES` whenever auth or persistence is left off, so
+  an insecure exposure is never silent.
+- **Startup ordering** - the backend has `initContainers` that block on the bundled
+  Postgres:5432 and NATS:4222 before it boots, so a fresh install connects to
+  Apache AGE on the first try instead of crash-looping on NATS or *silently* falling
+  back to the in-memory graph when Postgres is slow. (External Postgres/NATS are
+  assumed reachable and aren't gated.)
+
+### Transport security (TLS) & data-in-transit
+
+The app speaks plain HTTP by default and expects TLS to terminate **at the edge** -
+turn it on, it isn't hardcoded off:
+
+- **HTTPS at the ingress (recommended):** `--set ingress.tls.enabled=true
+  --set ingress.tls.secretName=perspectivegraph-tls`, and let cert-manager issue
+  the cert (`--set ingress.annotations."cert-manager\.io/cluster-issuer"=…`).
+- **HTTPS in the pod (no proxy):** `--set backend.tls.enabled=true
+  --set backend.tls.secretName=<kubernetes.io/tls secret>` - the API + ingest
+  servers then serve TLS ≥ 1.2 directly (env `TLS_CERT_FILE`/`TLS_KEY_FILE` for the
+  non-Helm/compose case).
+- **Database in transit:** the connection carries the attack map, so for a
+  managed/external Postgres set `--set postgres.sslMode=verify-full` (the chart
+  already defaults an external DB to `require`); the bundled in-cluster DB stays
+  `disable` since it has no TLS. Full control (CA path) via `POSTGRES_DSN` +
+  `sslrootcert`.
+- **NATS in transit:** point `NATS_URL` at a `tls://` endpoint; `NATS_TLS_CA`
+  trusts a private CA and `NATS_TLS_CERT`/`NATS_TLS_KEY` add a client cert for
+  **mutual TLS** (Helm: `--set nats.tls.enabled=true --set nats.tls.secretName=…`).
+- **mTLS for all in-cluster traffic (the easy way):** run a **service mesh**
+  (Linkerd / Istio) - it transparently mTLS-wraps every pod-to-pod hop (backend ↔
+  Postgres ↔ NATS ↔ dashboard) with automatic cert rotation and **no app changes**;
+  the per-component TLS knobs above are for when you *don't* run a mesh.
+- **Secrets at rest:** the chart writes credentials to a Kubernetes `Secret`
+  (base64, not encrypted in etcd by default). Either enable etcd encryption, or
+  manage the Secret externally - `--set secrets.existingSecret=<name>` makes the
+  chart **stop creating its own** and read a Secret you supply (External Secrets /
+  Sealed Secrets / Vault). App-managed secrets are already encrypted at rest on
+  disk via `STORE_ENCRYPTION_KEY`.
+
+Every optional capability is wired through both `docker-compose.yml` (as
+`${VAR:-}` passthroughs, off by default) and the chart, so a feature you enable in
+code is actually reachable in the running stack:
+
+- **Agentless connectors** - `--set connectors.enabled='{aws,azure}'` pulls cloud
+  posture on a schedule (`connectors.interval`); the AWS connector runs from bundled
+  fixtures unless `connectors.aws.mode=sdk` (then `connectors.aws.region` + an
+  assumable read-only `connectors.aws.roleArn`); the Azure connector runs from
+  fixtures (`connectors.azure.mode`), mapping normalized `az` state onto the
+  `cloudnet` shape.
+- **SSO login** - `auth.oidc.clientId` / `authorizeUrl` / `tokenUrl` / `scopes` are
+  the SPA-facing coordinates the dashboard login gate reads from `GET /auth/config`
+  to run the Authorization-Code + PKCE flow (the `issuer`/`audience`/`jwksUrl` trio
+  above does the server-side token verification).
+- **Dev workflow** - `github.token` turns the PR comment / merge-gate status and
+  remediation-as-PR from dry-run into live; `github.dashboardUrl` is the link those
+  comments point back to.
+- **AI-native layer (Claude or HuggingFace)** - `ai.apiKey` (Anthropic) enables
+  `/ai/*` (NL query, exec summary, path explain); empty keeps it self-gated off.
+  `ai.hf.token` is the free OpenAI-compatible alternative, used when `ai.apiKey` is
+  empty (`ai.hf.model`/`ai.hf.baseUrl` tune it). Both keys land in the Secret;
+  `ai.model`/`baseUrl`/`maxTokens` are optional overrides.
+- **Hardening** - `scrubIngest` (on by default) redacts secret-looking values out
+  of scanner output before the store; `crypto.storeEncryptionKey` encrypts the
+  file-backed governance stores at rest and `crypto.exportSigningKey` signs graph
+  exports (both land in the Secret).

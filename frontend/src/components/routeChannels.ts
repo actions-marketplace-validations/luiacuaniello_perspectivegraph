@@ -14,9 +14,9 @@ import type { AttackPath } from "../api/client";
 // still ranks correctly for someone who cannot separate a red from a green - and so that
 // colour is free to say the thing colour is actually good at: state.
 
-export type RouteStatus = "new" | "triaged" | "fixing" | "proven" | "refuted";
+export type RouteStatus = "new" | "triaged" | "fixing" | "proven" | "refuted" | "conflict";
 
-export const STATUS_META: Record<RouteStatus, { label: string; className: string; hint: string }> = {
+export const STATUS_META: Record<RouteStatus, { label: string; className: string; hint: string; glyph?: string }> = {
   new: {
     label: "New",
     className: "text-status-new",
@@ -37,18 +37,29 @@ export const STATUS_META: Record<RouteStatus, { label: string; className: string
   // exploitable or proven it was not. Those demand opposite actions - fix it, or suppress
   // it as a false positive - and the green read as "checked, fine" for both.
   //
-  // Proven is the only filled pill on the board. It earns that by form rather than by a
-  // new hue: colour here means lifecycle, and "somebody walked this end to end" is the
-  // strongest claim any row can carry.
+  // Proven was the only filled pill on the board, and a solid block outweighed the name of
+  // the asset beside it - the one thing the row is about. It keeps the strongest text and a
+  // check mark instead of the dot, which is enough to find it without shouting.
   proven: {
     label: "Proven",
-    className: "bg-slate-900 text-panel px-1.5 py-[1px] rounded",
+    className: "text-slate-800",
     hint: "A red-team or BAS run walked this route end to end. Not a model estimate - it was done.",
+    glyph: "✓",
   },
+  // Neutral, not green. Green reads as "defended", and a refuted route is not defended - a
+  // tester failed to walk it, which is evidence against the engine's claim, no more.
   refuted: {
     label: "Refuted",
-    className: "text-status-verified",
+    className: "text-slate-500",
     hint: "A tester tried this route and it did not work. The engine was wrong; suppress it as a false positive.",
+  },
+  // A refuted route with a runtime alert on it, or to an asset open to anyone. The green
+  // of Refuted would tell the reader to suppress the one route whose evidence says it is
+  // live. Outlined rather than a new hue, like Proven: red stays reserved for runtime.
+  conflict: {
+    label: "Evidence conflicts",
+    className: "border border-current text-slate-800 px-1.5 rounded",
+    hint: "A tester could not walk this route, but a runtime alert fired on it or the asset is open to anyone. A failed test does not undo that - find out which is wrong before suppressing it.",
   },
 };
 
@@ -62,10 +73,50 @@ export const STATUS_META: Record<RouteStatus, { label: string; className: string
 export function routeStatus(path: AttackPath): RouteStatus {
   const outcome = path.validation?.outcome;
   if (outcome === "confirmed" || outcome === "partial") return "proven";
-  if (outcome === "refuted") return "refuted";
+  if (outcome === "refuted") return path.runtimeConfirmed || path.directAccess ? "conflict" : "refuted";
   if (path.ticket) return "fixing";
   if (path.suppressed || path.suppression) return "triaged";
   return "new";
+}
+
+// The list's shape: one group per sensitive asset, in the engine's order, and the routes a
+// tester disproved set apart.
+//
+// Grouped because the same asset keeps coming back: cluster-admin reached four ways read as
+// four unrelated rows, when the question is "what do I stand to lose, and by how many
+// routes". A group sits where its most urgent route sits - the order is still the engine's,
+// read one asset at a time.
+//
+// Refuted routes leave the groups. They were already at the bottom (the engine drops them to
+// P3), but mixed in with routes nobody has tested they looked like work still to do. A
+// refuted route with a runtime alert on it is not here: that is a conflict, and it stays
+// where the alert puts it.
+export interface TargetGroup {
+  key: string;
+  target: AttackPath["nodes"][number] | undefined;
+  routes: AttackPath[];
+}
+
+export function groupByTarget(paths: AttackPath[]): { groups: TargetGroup[]; refuted: AttackPath[] } {
+  const groups: TargetGroup[] = [];
+  const byKey = new Map<string, TargetGroup>();
+  const refuted: AttackPath[] = [];
+  for (const p of paths) {
+    if (routeStatus(p) === "refuted") {
+      refuted.push(p);
+      continue;
+    }
+    const target = p.nodes[p.nodes.length - 1];
+    const key = target?.id ?? p.id;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, target, routes: [] };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    g.routes.push(p);
+  }
+  return { groups, refuted };
 }
 
 // Who recorded the verdict, for the briefing to say whether live traffic on a route is
@@ -74,17 +125,11 @@ export function verdictSource(path: AttackPath): string | undefined {
   return path.validation?.source || undefined;
 }
 
-// Order for display: a route a tester DISPROVED sinks to the bottom.
-//
-// The engine ranks by composite priority, which knows nothing about verdicts - so a
-// route the red team walked and could not exploit kept its score and sat second on the
-// home page, in one of the three slots the product spends its credibility on. The
-// trust page counted the same route among the refuted. Two screens, opposite advice.
-//
-// Sunk rather than hidden: "the engine was wrong here" is information, and a reader
-// scrolling the full list should still meet it - with its Refuted pill on - rather than
-// wonder where it went. Everything else keeps the engine's own order, so this changes
-// exactly one thing.
-export function orderForDisplay(paths: AttackPath[]): AttackPath[] {
-  return [...paths].sort((a, b) => Number(routeStatus(a) === "refuted") - Number(routeStatus(b) === "refuted"));
+// routeLabel names a route in one line: "entry → target", or, for a sensitive asset
+// open to anyone - a direct-access path, the asset alone - the asset and why, since
+// "customer-exports → customer-exports" reads as a route from itself.
+export function routeLabel(path: AttackPath): string {
+  const to = path.nodes[path.nodes.length - 1]?.name ?? "?";
+  if (path.directAccess) return `${to} (open to anyone)`;
+  return `${path.nodes[0]?.name ?? "?"} → ${to}`;
 }

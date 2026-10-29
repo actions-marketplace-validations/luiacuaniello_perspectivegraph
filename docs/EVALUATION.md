@@ -19,9 +19,11 @@ inside a large organisation, so start them on day one and run the stages while t
 
 1. **A PostgreSQL with the Apache AGE extension.** This is the one that surprises people:
    **AWS RDS/Aurora and Google Cloud SQL do not offer AGE**, so on those clouds you run
-   the database yourself. Azure Database for PostgreSQL flexible server does offer it.
-   Settle this first - [OPERATIONS §3](OPERATIONS.md#3-the-database-postgresql--apache-age)
-   is the matrix and the recipes.
+   the database yourself - on Kubernetes the chart hands it to the CloudNativePG operator,
+   and on one machine `make prod-init` runs and backs up the bundled one. Azure Database for
+   PostgreSQL flexible server does offer it. Settle this first -
+   [OPERATIONS §3](OPERATIONS.md#3-the-database-postgresql--apache-age) is the matrix and
+   the recipes.
 2. **A read-only cloud role.** Everything the AWS connector calls is inside the AWS-managed
    `SecurityAudit` policy. Nothing is ever written.
 3. **A decision about who may see the output.** The graph is a map of how to attack you, so
@@ -69,8 +71,11 @@ unreachable, and one seed and confirmed it really is exposed.
 
 ## Stage 2 - a day, the first real deployment
 
-Now it needs somewhere to live (§ the three long poles) and something to correlate. Deploy,
-then feed it what your scanners already produce - it does not scan anything itself:
+Now it needs somewhere to live (§ the three long poles) and something to correlate.
+[Connecting your own infrastructure](manual/connect-your-own.md) has a complete recipe for each
+place it can live - one machine, EKS, any other cluster - with the AWS account and the clusters
+connected. With a database of your own, the chart takes it like this; then feed it what your
+scanners already produce - it does not scan anything itself:
 
 ```bash
 # The hardened profile ships inside the chart - pull it once, edit it, keep it under
@@ -81,7 +86,7 @@ helm install perspectivegraph oci://ghcr.io/luiacuaniello/charts/perspectivegrap
   --set postgres.externalHost=db.internal --set ingress.host=pg.example.com
 ```
 
-The [onboarding runbook](MANUAL.md#onboarding-runbook) has the per-source ingest calls. Feed
+The [onboarding runbook](manual/onboarding.md) has the per-source ingest calls. Feed
 **at least** one scanner report and the cloud/IAM topology, or there is nothing to correlate
 into a path.
 
@@ -131,7 +136,7 @@ Stated here so it is not discovered halfway through:
 - **The scores are not field-calibrated.** They are the model's belief with its evidence
   named, not a measured frequency. Use them to rank and to cut routes; do not put the
   percentage in front of a board. The
-  [calibration panel](MANUAL.md#closing-the-loop-calibration-against-observed-outcomes)
+  [calibration panel](manual/accuracy.md#closing-the-loop-calibration-against-observed-outcomes)
   withholds a verdict entirely until real outcomes exist.
 - **One cloud is genuinely connected.** AWS is live; Azure is fixtures only; there is no GCP
   connector. Several AWS accounts can be pulled in one pass, but they are listed, not

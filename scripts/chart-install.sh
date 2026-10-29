@@ -13,7 +13,18 @@
 # A render is not an install. This installs.
 #
 #   NODE_IMAGE=kindest/node:v1.33.12  bash scripts/chart-install.sh
+#   DATABASE=cloudnativepg            the database run by the CloudNativePG operator
+#   CONNECTOR=kubernetes              the backend reads the cluster it runs in
 #   KEEP=1                            leaves the cluster up for inspection
+#
+# DATABASE=cloudnativepg installs the operator, lets it run a primary and a replica, and
+# then does the one thing a production database is for: it deletes the primary and checks
+# that a write still reaches the graph, through the replica the operator promoted.
+#
+# CONNECTOR=kubernetes deploys a workload behind an Ingress whose service account is bound
+# to cluster-admin, posts nothing, and checks that the backend's own pulls of the cluster
+# find the route - then deletes the binding and checks the route is retracted, and that the
+# backend's account could list pods but neither read secrets nor create pods.
 set -euo pipefail
 
 CLUSTER="${CLUSTER:-perspectivegraph-chart}"
@@ -26,6 +37,24 @@ NODE_IMAGE="${NODE_IMAGE:-kindest/node:v1.36.1@sha256:3489c7674813ba5d8b1a9977ba
 CHART="deploy/helm/perspectivegraph"
 RELEASE="${RELEASE:-chartprobe}"
 KEEP="${KEEP:-0}"
+DATABASE="${DATABASE:-bundled}"
+CONNECTOR="${CONNECTOR:-}"
+case "$CONNECTOR" in
+  ""|kubernetes) ;;
+  *) echo "chart-install: CONNECTOR must be empty or kubernetes, not '$CONNECTOR'" >&2; exit 2 ;;
+esac
+# The operator, pinned to a release and to the bytes of its manifest: a checksum, not just
+# a version, because the manifest is cluster-admin YAML fetched from a release CDN.
+CNPG_VERSION=1.30.1
+CNPG_SHA256=37237f145d8138256ea25ae830f87759255665ff08f8d552fdd8224a5ec032fb
+
+case "$DATABASE" in
+  bundled|cloudnativepg) ;;
+  *) echo "chart-install: DATABASE must be bundled or cloudnativepg, not '$DATABASE'" >&2; exit 2 ;;
+esac
+# One database image either way: the operator runs the same one the chart bundles.
+PG_IMAGE=perspectivegraph-postgres
+PG_CONTEXT=deploy/postgres
 
 die() { echo "chart-install: $*" >&2; exit 1; }
 ok()  { echo "chart-install: $*"; }
@@ -45,7 +74,26 @@ trap cleanup EXIT
 
 kind delete cluster --name "$CLUSTER" >/dev/null 2>&1 || true
 ok "creating cluster on ${NODE_IMAGE%%@*}"
-kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait 180s >/dev/null
+# In CI, Docker Hub's images come through a mirror (scripts/ci-docker-mirror.sh sets
+# REGISTRY_MIRROR), and the node needs it as much as the runner: NATS and the chart's wait
+# image are pulled by the node's own containerd, not by the runner's daemon. containerd reads
+# a registry's hosts.toml from config_path, which kind leaves unset, so the cluster is
+# created with it. Without REGISTRY_MIRROR, as on a laptop, the cluster is kind's default.
+kind_config=()
+if [ -n "${REGISTRY_MIRROR:-}" ]; then
+  cfg="$(mktemp)"
+  printf '%s\n' 'kind: Cluster' 'apiVersion: kind.x-k8s.io/v1alpha4' 'containerdConfigPatches:' \
+    '  - |-' '    [plugins."io.containerd.grpc.v1.cri".registry]' \
+    '      config_path = "/etc/containerd/certs.d"' >"$cfg"
+  kind_config=(--config "$cfg")
+fi
+kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" ${kind_config[@]+"${kind_config[@]}"} --wait 180s >/dev/null
+if [ -n "${REGISTRY_MIRROR:-}" ]; then
+  printf 'server = "https://registry-1.docker.io"\n\n[host."%s"]\n  capabilities = ["pull", "resolve"]\n' "$REGISTRY_MIRROR" |
+    docker exec -i "${CLUSTER}-control-plane" sh -c \
+      'mkdir -p /etc/containerd/certs.d/docker.io && cat >/etc/containerd/certs.d/docker.io/hosts.toml'
+  ok "the node pulls Docker Hub's images through $REGISTRY_MIRROR"
+fi
 
 # The chart points at the published database image for the release it belongs to, which
 # does not exist yet for the commit under test. Build it and hand it to the node.
@@ -56,7 +104,7 @@ kind create cluster --name "$CLUSTER" --image "$NODE_IMAGE" --wait 180s >/dev/nu
 # Pulling would sit in ImagePullBackOff until the timeout. Building instead also tests the
 # chart against the code under review rather than against the last release.
 ok "building the three images the chart deploys"
-docker build -q -t perspectivegraph-postgres:charttest deploy/postgres >/dev/null
+docker build -q -t "${PG_IMAGE}:charttest" "$PG_CONTEXT" >/dev/null
 docker build -q -t perspectivegraph-backend:charttest backend >/dev/null
 docker build -q -t perspectivegraph-dashboard:charttest frontend >/dev/null
 
@@ -65,17 +113,112 @@ docker build -q -t perspectivegraph-dashboard:charttest frontend >/dev/null
 # version: 4 (supported versions: 2 and 3)" before it copies anything, while the node's own
 # containerd is quite happy on version 2. Piping the archive straight into the node's
 # containerd skips kind's loader and behaves the same on a laptop and on a CI runner.
-for img in perspectivegraph-postgres perspectivegraph-backend perspectivegraph-dashboard; do
+for img in "$PG_IMAGE" perspectivegraph-backend perspectivegraph-dashboard; do
   docker save "${img}:charttest" \
     | docker exec -i "${CLUSTER}-control-plane" ctr --namespace=k8s.io images import - >/dev/null \
     || die "could not import ${img} into the node"
 done
 
-ok "helm install with default values"
+kc() { kubectl --context "kind-$CLUSTER" "$@"; }
+probe_image=$(helm show values "$CHART" | awk '/^  waitImage:/ {print $2; exit}')
+
+if [ "$DATABASE" = "cloudnativepg" ]; then
+  ok "installing the CloudNativePG operator ${CNPG_VERSION}"
+  manifest="$(mktemp)"
+  curl -fsSL --retry 4 --retry-all-errors --retry-delay 3 --connect-timeout 20 -o "$manifest" \
+    "https://github.com/cloudnative-pg/cloudnative-pg/releases/download/v${CNPG_VERSION}/cnpg-${CNPG_VERSION}.yaml" \
+    || die "could not download the operator manifest"
+  echo "${CNPG_SHA256}  ${manifest}" | shasum -a 256 -c - >/dev/null \
+    || die "the operator manifest does not match its pinned checksum"
+  kc apply --server-side -f "$manifest" >/dev/null
+  kc -n cnpg-system rollout status deployment/cnpg-controller-manager --timeout=180s >/dev/null \
+    || die "the operator did not become ready"
+  # Ready is not the same as admitting: the operator validates every Cluster through a
+  # webhook, which answers a moment after the pod does. Ask it, rather than sleep.
+  admitted=0
+  for _ in $(seq 1 30); do
+    if printf '%s\n' 'apiVersion: postgresql.cnpg.io/v1' 'kind: Cluster' 'metadata: {name: webhook-probe}' \
+         'spec: {instances: 1, storage: {size: 1Gi}}' | kc apply --dry-run=server -f - >/dev/null 2>&1; then
+      admitted=1; break
+    fi
+    sleep 2
+  done
+  [ "$admitted" = 1 ] || die "the operator's webhook never answered"
+  # graphStrict: the backend refuses to start without Apache AGE instead of falling back to
+  # an in-memory graph - so its readiness below means the database works, not just that a
+  # process is up.
+  DB_ARGS=(--set postgres.cloudnativepg.enabled=true
+           --set postgres.image.repository="$PG_IMAGE"
+           --set postgres.image.tag=charttest
+           --set postgres.cloudnativepg.storage.size=1Gi
+           --set backend.graphStrict=true)
+else
+  DB_ARGS=(--set postgres.image.repository="$PG_IMAGE"
+           --set postgres.image.tag=charttest)
+fi
+
+# Never empty: bash 3.2, macOS's, refuses "${CONN_ARGS[@]}" on an empty array under set -u.
+# The placeholder sets the default it already has.
+CONN_ARGS=(--set backend.logLevel=info)
+if [ "$CONNECTOR" = "kubernetes" ]; then
+  ok "a workload behind an Ingress whose service account is bound to cluster-admin"
+  kc apply -f - >/dev/null <<'YAML'
+apiVersion: v1
+kind: Namespace
+metadata: {name: shop}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: web-sa, namespace: shop}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: web-sa-admin}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin}
+subjects: [{kind: ServiceAccount, name: web-sa, namespace: shop}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web, namespace: shop}
+spec:
+  selector: {matchLabels: {app: web}}
+  template:
+    metadata: {labels: {app: web}}
+    spec:
+      serviceAccountName: web-sa
+      automountServiceAccountToken: false
+      securityContext: {runAsNonRoot: true, runAsUser: 65534, seccompProfile: {type: RuntimeDefault}}
+      containers:
+        - name: web
+          image: busybox:1.37@sha256:9532d8c39891ca2ecde4d30d7710e01fb739c87a8b9299685c63704296b16028
+          command: ["sh", "-c", "sleep 3600"]
+          securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web, namespace: shop}
+spec: {selector: {app: web}, ports: [{port: 80}]}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata: {name: web, namespace: shop}
+spec:
+  rules:
+    - host: shop.example.com
+      http:
+        paths:
+          - {path: /, pathType: Prefix, backend: {service: {name: web, port: {number: 80}}}}
+YAML
+  kc -n shop rollout status deploy/web --timeout=180s >/dev/null || die "the workload never ran"
+  CONN_ARGS=(--set 'connectors.enabled={kubernetes}' --set connectors.kubernetes.clusterName=chartprobe
+             --set connectors.interval=20s --set backend.analyzerInterval=10s)
+fi
+
+ok "helm install with default values (database: $DATABASE${CONNECTOR:+, connector: $CONNECTOR})"
 if ! helm install "$RELEASE" "$CHART" \
       --kube-context "kind-$CLUSTER" \
-      --set postgres.image.repository=perspectivegraph-postgres \
-      --set postgres.image.tag=charttest \
+      "${DB_ARGS[@]}" \
+      "${CONN_ARGS[@]}" \
       --set backend.image.repository=perspectivegraph-backend \
       --set backend.image.tag=charttest \
       --set frontend.image.repository=perspectivegraph-dashboard \
@@ -92,21 +235,139 @@ for p in json.load(sys.stdin)["items"]:
   die "helm install failed"
 fi
 
+# Helm cannot wait for what the operator creates: its pods are not part of the release. So
+# under CloudNativePG wait for the cluster itself first, or a replica still joining reads as
+# a failure here.
+if [ "$DATABASE" = "cloudnativepg" ]; then
+  kc wait --for=condition=Ready "cluster/${RELEASE}-perspectivegraph-pg" --timeout=300s >/dev/null \
+    || die "the CloudNativePG cluster never became ready"
+fi
+
 # --wait already gates on readiness; assert it separately so a chart that stops declaring
-# probes cannot make this pass by having nothing to wait for.
-not_ready=$(kubectl --context "kind-$CLUSTER" get pods \
+# probes cannot make this pass by having nothing to wait for. Succeeded is a finished Job -
+# the operator initialises the database and joins each replica with one - not a pod that
+# failed to run.
+not_ready=$(kc get pods \
   -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.phase}{"\n"}{end}' \
-  | grep -v ' Running$' || true)
+  | grep -v -E ' (Running|Succeeded)$' || true)
 [ -z "$not_ready" ] || die "pods not Running:\n$not_ready"
 
 # The database is the reason this image is built here at all: prove the extension is
 # actually loadable, not merely that the container started.
 ok "checking Apache AGE inside the cluster"
-version=$(kubectl --context "kind-$CLUSTER" exec "${RELEASE}-perspectivegraph-postgres-0" -- \
-  psql -U perspective -d perspectivegraph -tAc \
-  "SELECT extversion FROM pg_extension WHERE extname='age'" 2>/dev/null | tr -d '[:space:]')
-[ -n "$version" ] || die "the age extension is not installed in the bundled database"
-ok "apache age $version loaded"
+if [ "$DATABASE" = "bundled" ]; then
+  version=$(kc exec "${RELEASE}-perspectivegraph-postgres-0" -- \
+    psql -U perspective -d perspectivegraph -tAc \
+    "SELECT extversion FROM pg_extension WHERE extname='age'" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$version" ] || die "the age extension is not installed in the bundled database"
+  ok "apache age $version loaded"
+else
+  CL="${RELEASE}-perspectivegraph-pg"
+  kc wait --for=condition=Ready "cluster/$CL" --timeout=300s >/dev/null || die "cluster $CL never became ready"
+  ready=$(kc get cluster "$CL" -o jsonpath='{.status.readyInstances}')
+  [ "$ready" = 2 ] || die "cluster $CL has $ready ready instance(s), not 2"
+  primary=$(kc get cluster "$CL" -o jsonpath='{.status.currentPrimary}')
+  # The superuser over the pod's local socket: the operator keeps it off the network. -q
+  # keeps psql from printing a command tag for each statement before the result, which the
+  # whitespace stripping would otherwise glue onto it ("LOADSET1" is not a count).
+  sql() { kc exec "$1" -c postgres -- psql -q -U postgres -d perspectivegraph -tAc "$2" 2>/dev/null | tr -d '[:space:]'; }
+
+  version=$(sql "$primary" "SELECT extversion FROM pg_extension WHERE extname='age'")
+  [ -n "$version" ] || die "the age extension is not installed on the primary"
+  ok "apache age $version loaded on $primary, with a replica beside it"
+
+  # verify-full is the chart's default here, so a session that exists at all was checked
+  # against the operator's CA and the Service's name. Check that it is encrypted too, from
+  # the server's side - and that the graph's schema is the backend's, which it must create
+  # itself to be able to write to.
+  tls=""
+  for _ in $(seq 1 30); do
+    tls=$(sql "$primary" "SELECT bool_and(s.ssl) FROM pg_stat_ssl s JOIN pg_stat_activity a USING (pid) WHERE a.usename = 'perspective'")
+    [ -n "$tls" ] && break
+    sleep 2
+  done
+  [ "$tls" = t ] || die "the backend's sessions are not all encrypted (ssl: '${tls:-no session}')"
+  owner=$(sql "$primary" "SELECT nspowner::regrole FROM pg_namespace WHERE nspname = 'perspective'")
+  [ "$owner" = perspective ] || die "the graph schema is owned by '${owner:-nobody}', not by the backend's role"
+  ok "the backend connects over verified TLS as a role that is not a superuser, and owns its graph"
+
+  restarts_before=$(kc get pods -l app.kubernetes.io/component=backend -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
+  # Killed, not deleted. A graceful delete is maintenance: the instance manager runs a
+  # smart shutdown that waits up to three minutes for clients to disconnect - and the
+  # backend's pool never does - before it lets go. A primary whose node dies gets no such
+  # grace, and that is the case a replica exists for. Measured on kind: the replica was
+  # promoted 21s after the kill, and the next write landed 4s later.
+  ok "failing over: killing the primary, $primary"
+  kc delete pod "$primary" --grace-period=0 --force >/dev/null 2>&1
+  promoted="$primary"
+  for _ in $(seq 1 90); do
+    promoted=$(kc get cluster "$CL" -o jsonpath='{.status.currentPrimary}')
+    [ -n "$promoted" ] && [ "$promoted" != "$primary" ] && break
+    sleep 3
+  done
+  [ "$promoted" != "$primary" ] || die "no replica was promoted"
+  role=$(kc get pod "$promoted" -o jsonpath='{.metadata.labels.cnpg\.io/instanceRole}')
+  [ "$role" = primary ] || die "$promoted was named primary but its pod says '$role'"
+  ok "$promoted promoted"
+
+  # A write after the failover must land on the new primary: the backend reaches the
+  # database through the -rw Service, which the operator moved, and reconnects on its own.
+  payload='{"apiVersion":"v1","kind":"List","items":[{"apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":"failover-probe","namespace":"probe"}}]}'
+  written=0
+  for _ in $(seq 1 30); do
+    kc run "ingestprobe-$RANDOM" --rm -i --restart=Never --quiet --image="$probe_image" --command -- \
+      wget -q -O /dev/null --header 'Content-Type: application/json' --post-data "$payload" \
+      "http://${RELEASE}-perspectivegraph-backend:8081/ingest/k8s?cluster=failover" >/dev/null 2>&1 || true
+    n=$(sql "$promoted" "LOAD 'age'; SET search_path = ag_catalog, public; SELECT count(*) FROM cypher('perspective', \$\$MATCH (n) WHERE n.name = 'probe/failover-probe' RETURN n\$\$) AS (n agtype)")
+    if [ "${n:-0}" -gt 0 ]; then written=1; break; fi
+    sleep 4
+  done
+  [ "$written" = 1 ] || die "nothing written after the failover reached the new primary"
+  restarts_after=$(kc get pods -l app.kubernetes.io/component=backend -o jsonpath='{.items[0].status.containerStatuses[0].restartCount}')
+  [ "$restarts_after" = "$restarts_before" ] || die "the backend restarted during the failover ($restarts_before -> $restarts_after)"
+  ok "a write after the failover reached $promoted, and the backend did not restart"
+fi
+
+if [ "$CONNECTOR" = "kubernetes" ]; then
+  as="system:serviceaccount:default:${RELEASE}-perspectivegraph-backend"
+  [ "$(kc auth can-i list pods --all-namespaces --as "$as")" = yes ] || die "the backend's account cannot list pods"
+  [ "$(kc auth can-i get secrets --all-namespaces --as "$as" || true)" = no ] || die "the backend's account can read secrets"
+  [ "$(kc auth can-i create pods --all-namespaces --as "$as" || true)" = no ] || die "the backend's account can create pods"
+  ok "the backend's account lists pods, and can neither read secrets nor create pods"
+
+  kc port-forward "svc/${RELEASE}-perspectivegraph-backend" 18080:8080 >/dev/null 2>&1 &
+  pf=$!
+  trap 'kill $pf 2>/dev/null; cleanup' EXIT
+  for _ in $(seq 1 30); do curl -s -o /dev/null http://localhost:18080/healthz && break; sleep 1; done
+  # The routes through the workload to cluster-admin, one per line.
+  admin_routes() {
+    curl -s -X POST http://localhost:18080/graphql -H 'Content-Type: application/json' \
+      -d '{"query":"{ attackPaths(limit:200){ nodes { name } } }"}' |
+      jq -r '.data.attackPaths[] | [.nodes[].name]
+             | select(index("cluster-admin") and index("shop/web-sa")) | join(" -> ")'
+  }
+  route=""
+  for _ in $(seq 1 36); do route=$(admin_routes); [ -n "$route" ] && break; sleep 5; done
+  [ -n "$route" ] || die "the connector's pulls never produced the route through shop/web-sa to cluster-admin"
+  ok "found with nothing posted: $(echo "$route" | head -1)"
+  kc delete clusterrolebinding web-sa-admin >/dev/null
+  gone=""
+  for _ in $(seq 1 36); do [ -z "$(admin_routes)" ] && { gone=1; break; }; sleep 5; done
+  [ -n "$gone" ] || die "the route outlived the binding it ran through"
+  ok "binding deleted: the next pull retracted the route"
+fi
+
+# The bus must refuse a client without credentials: events on it are trusted, and the
+# ingest webhook's signature check runs before them, not after. The backend reaching it at
+# all (--wait above) proves the password works; this proves it is required.
+ok "checking that NATS refuses an unauthenticated client"
+reply=$(kubectl --context "kind-$CLUSTER" run natsprobe --rm -i --restart=Never --quiet \
+  --image="$probe_image" --command -- sh -c \
+  "printf 'CONNECT {\"verbose\":true}\r\nPING\r\n' | nc -w 5 ${RELEASE}-perspectivegraph-nats 4222" 2>&1 || true)
+case "$reply" in
+  *"Authorization Violation"*) ok "nats refused it" ;;
+  *) die "nats did not refuse an unauthenticated client:\n$reply" ;;
+esac
 
 count=$(kubectl --context "kind-$CLUSTER" get pods --no-headers | wc -l | tr -d ' ')
 ok "PASS - $count pod(s) running on ${NODE_IMAGE%%@*}"

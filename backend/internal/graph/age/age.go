@@ -122,6 +122,11 @@ type Store struct {
 	// pendingReady records that the parked-edge table exists; see preparePending.
 	pendingMu    sync.Mutex
 	pendingReady bool
+
+	// provReady records that the provenance and removal-epoch tables exist; see
+	// prepareProvenance.
+	provMu    sync.Mutex
+	provReady bool
 }
 
 func newStore(dsn, graphName string) (*Store, error) {
@@ -194,14 +199,14 @@ func (s *Store) Ping(ctx context.Context) error {
 
 // UpsertNode creates or updates one vertex. It is a batch of one: see UpsertBatch.
 func (s *Store) UpsertNode(ctx context.Context, n ontology.Node) error {
-	return s.upsertBatch(ctx, []ontology.Node{n}, nil, false)
+	return s.upsertBatch(ctx, []ontology.Node{n}, nil, false, nil)
 }
 
 // UpsertEdge creates or updates one directed relationship. It is a batch of one that
 // does not park: when either endpoint is not in the graph yet it returns an error
 // wrapping graph.ErrEndpointsMissing instead of silently doing nothing.
 func (s *Store) UpsertEdge(ctx context.Context, e ontology.Edge) error {
-	return s.upsertBatch(ctx, nil, []ontology.Edge{e}, false)
+	return s.upsertBatch(ctx, nil, []ontology.Edge{e}, false, nil)
 }
 
 // UpsertBatch writes nodes, then edges, in ONE transaction that holds this graph's
@@ -226,10 +231,16 @@ func (s *Store) UpsertEdge(ctx context.Context, e ontology.Edge) error {
 // the same lock, so a replica parking an edge and another writing its endpoint cannot
 // miss each other.
 func (s *Store) UpsertBatch(ctx context.Context, nodes []ontology.Node, edges []ontology.Edge) error {
-	return s.upsertBatch(ctx, nodes, edges, true)
+	return s.upsertBatch(ctx, nodes, edges, true, nil)
 }
 
-func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []ontology.Edge, park bool) error {
+// UpsertBatchFrom is UpsertBatch that also records, in the same transaction, who asserted
+// every element it writes - the edges it parks included (graph.OriginWriter).
+func (s *Store) UpsertBatchFrom(ctx context.Context, o graph.Origin, nodes []ontology.Node, edges []ontology.Edge) error {
+	return s.upsertBatch(ctx, nodes, edges, true, &o)
+}
+
+func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []ontology.Edge, park bool, origin *graph.Origin) error {
 	// Every statement is built before the transaction opens, so a value the store
 	// refuses fails the event before anything is written.
 	nodeQs := make([]nodeStmts, 0, len(nodes))
@@ -242,7 +253,7 @@ func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []
 		nodeQs = append(nodeQs, q)
 		labels[n.Label] = true
 	}
-	edgeQs := make([]string, 0, len(edges))
+	edgeQs := make([]edgeStmts, 0, len(edges))
 	for _, e := range edges {
 		q, err := s.edgeSQL(e)
 		if err != nil {
@@ -254,6 +265,11 @@ func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []
 	s.prepareLabels(ctx, labels)
 	if park {
 		if err := s.preparePending(ctx); err != nil {
+			return err
+		}
+	}
+	if origin != nil {
+		if err := s.prepareProvenance(ctx); err != nil {
 			return err
 		}
 	}
@@ -295,7 +311,7 @@ func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []
 			}
 		}
 		for i, q := range edgeQs {
-			landed, err := execReturnsRow(ctx, tx, q)
+			landed, err := landEdge(ctx, tx, q)
 			if err != nil {
 				return err
 			}
@@ -310,6 +326,9 @@ func (s *Store) upsertBatch(ctx context.Context, nodes []ontology.Node, edges []
 				}
 			}
 			waiting = nil
+		}
+		if origin != nil {
+			return s.recordOrigins(ctx, tx, *origin, nodes, edges)
 		}
 		return nil
 	})
@@ -361,12 +380,32 @@ func (s *Store) nodeSQL(n ontology.Node) (nodeStmts, error) {
 	return nodeStmts{update: update, create: create}, nil
 }
 
+// edgeStmts is the upsert of one relationship. keep, set only for an inferred edge, runs
+// first and returns a row when a stated edge is already there: a guess never replaces a
+// fact (graph.Supersedes), so it only refreshes the stamp and the upsert is skipped.
+type edgeStmts struct{ keep, upsert string }
+
+// landEdge runs one edge's statements and reports whether the edge is in the graph:
+// written, or kept because a stated one was already there.
+func landEdge(ctx context.Context, tx *sql.Tx, q edgeStmts) (bool, error) {
+	if q.keep != "" {
+		if kept, err := execReturnsRow(ctx, tx, q.keep); err != nil || kept {
+			return kept, err
+		}
+	}
+	return execReturnsRow(ctx, tx, q.upsert)
+}
+
 // edgeSQL renders the upsert of one relationship. It RETURNs a row only when both
 // endpoints matched, which is how the caller tells a landed edge from a waiting one.
 // Endpoints are matched with WHERE for the same reason as in nodeSQL.
-func (s *Store) edgeSQL(e ontology.Edge) (string, error) {
+//
+// `SET e +=` merges properties, so a stated edge also REMOVEs the labels an earlier
+// guess on the same edge left: without that, a fact written over a guess kept saying
+// it was one.
+func (s *Store) edgeSQL(e ontology.Edge) (edgeStmts, error) {
 	if !ontology.IsValidEdgeType(e.Type) {
-		return "", fmt.Errorf("refusing to upsert edge with unknown type %q", e.Type)
+		return edgeStmts{}, fmt.Errorf("refusing to upsert edge with unknown type %q", e.Type)
 	}
 	// Native agtype edge properties, consistent with nodes: `p` (clamped) plus any
 	// edge attributes, so they're queryable too (e.g. the privesc `primitives`).
@@ -375,10 +414,30 @@ func (s *Store) edgeSQL(e ontology.Edge) (string, error) {
 		props[k] = v
 	}
 	props["p"] = clampProb(e.ExploitProbability)
-	inner := fmt.Sprintf(
-		`MATCH (a), (b) WHERE a.id = %s AND b.id = %s MERGE (a)-[e:%s]->(b) SET e += %s RETURN 1`,
-		cypherQuote(e.From), cypherQuote(e.To), e.Type, cypherMap(props))
-	return s.cypherSQL(inner, `v agtype`)
+	var q edgeStmts
+	clearGuess := fmt.Sprintf(` REMOVE e.%s, e.%s`, ontology.PropResolutionMethod, ontology.PropResolutionConfidence)
+	if graph.Inferred(e) {
+		clearGuess = ""
+		stamp := ""
+		if ls, ok := graph.LastSeen(e.Properties); ok {
+			stamp = fmt.Sprintf(` SET e.%s = %d`, ontology.PropLastSeen, ls)
+		}
+		keep, err := s.cypherSQL(fmt.Sprintf(
+			`MATCH (a)-[e:%s]->(b) WHERE a.id = %s AND b.id = %s AND e.%s IS NULL%s RETURN 1`,
+			e.Type, cypherQuote(e.From), cypherQuote(e.To), ontology.PropResolutionMethod, stamp), `v agtype`)
+		if err != nil {
+			return edgeStmts{}, err
+		}
+		q.keep = keep
+	}
+	upsert, err := s.cypherSQL(fmt.Sprintf(
+		`MATCH (a), (b) WHERE a.id = %s AND b.id = %s MERGE (a)-[e:%s]->(b) SET e += %s%s RETURN 1`,
+		cypherQuote(e.From), cypherQuote(e.To), e.Type, cypherMap(props), clearGuess), `v agtype`)
+	if err != nil {
+		return edgeStmts{}, err
+	}
+	q.upsert = upsert
+	return q, nil
 }
 
 // execReturnsRow runs q and reports whether it produced at least one row.
@@ -455,9 +514,28 @@ func (s *Store) preparePending(ctx context.Context) error {
 func (s *Store) landParked(ctx context.Context, tx *sql.Tx, nodes []ontology.Node) error {
 	t := s.pendingRef()
 	// #nosec G202 -- t is two quoted identifiers built from a validated graph name
-	if _, err := tx.ExecContext(ctx, `DELETE FROM `+t+` WHERE parked_at < now() - make_interval(secs => $1)`,
-		graph.PendingEdgeTTL.Seconds()); err != nil {
+	expired, err := tx.QueryContext(ctx, `DELETE FROM `+t+` WHERE parked_at < now() - make_interval(secs => $1)
+		RETURNING edge_type, from_id, to_id`, graph.PendingEdgeTTL.Seconds())
+	if err != nil {
 		return fmt.Errorf("expire parked edges: %w", err)
+	}
+	var gone []elemKey
+	for expired.Next() {
+		var k elemKey
+		if err := expired.Scan(&k.a, &k.b, &k.c); err != nil {
+			expired.Close()
+			return err
+		}
+		k.kind = "e"
+		gone = append(gone, k)
+	}
+	expired.Close()
+	if err := expired.Err(); err != nil {
+		return err
+	}
+	// An edge that waited out the TTL is gone for good; so is the record of who sent it.
+	if err := s.forgetOrigins(ctx, tx, gone); err != nil {
+		return err
 	}
 	if len(nodes) == 0 {
 		return nil
@@ -498,7 +576,7 @@ func (s *Store) landParked(ctx context.Context, tx *sql.Tx, nodes []ontology.Nod
 		if err != nil {
 			continue // only valid edges are ever parked; nothing to retry otherwise
 		}
-		landed, err := execReturnsRow(ctx, tx, q)
+		landed, err := landEdge(ctx, tx, q)
 		if err != nil {
 			return err
 		}
@@ -754,9 +832,11 @@ const (
 	maxPathsReturned       = 5000
 )
 
-// CriticalPaths finds internet-exposed → crown-jewel routes IN THE DATABASE via
-// a Cypher variable-length match over the native node properties, bounded to
-// maxHops. It returns up to maxPathsReturned such paths; the analyzer scores them
+// CriticalPaths finds seed → crown-jewel routes IN THE DATABASE via a Cypher
+// variable-length match over the native node properties, bounded to maxHops. A seed is
+// what ontology.Node.IsSeed says it is - internet-exposed, open to anyone, or an identity
+// whose credentials are assumed leaked - and the WHERE clause below must keep saying the
+// same, or the database finder and the in-process one start from different places. It returns up to maxPathsReturned such paths; the analyzer scores them
 // and keeps the best per (source, target).
 //
 // NOTE: this enumerates paths (not a weighted shortest path, which AGE lacks), so
@@ -771,7 +851,9 @@ func (s *Store) CriticalPaths(ctx context.Context, maxHops int) ([]graph.RawPath
 	}
 	inner := fmt.Sprintf(
 		`MATCH p=(a)-[*1..%d]->(b) `+
-			`WHERE a.internet_exposed = true AND b.crown_jewel = true AND id(a) <> id(b) `+
+			// The network verdict, where there is one, decides exposure (ontology.Node.InternetExposed).
+			`WHERE (coalesce(a.network_exposed, a.internet_exposed) = true OR a.credential_exposed = true OR a.public_access = true) `+
+			`AND b.crown_jewel = true AND id(a) <> id(b) `+
 			`RETURN nodes(p), relationships(p) LIMIT %d`, maxHops, maxPathsReturned)
 	q, err := s.cypherSQL(inner, `ns agtype, rs agtype`)
 	if err != nil {
@@ -838,12 +920,20 @@ func (s *Store) Prune(ctx context.Context, before time.Time) (graph.PruneStats, 
 		return graph.PruneStats{}, err
 	}
 
+	if err := s.prepareProvenance(ctx); err != nil {
+		return graph.PruneStats{}, err
+	}
 	var stats graph.PruneStats
 	err = s.withAGE(ctx, func(tx *sql.Tx) error {
 		// Under the write lock, so a prune never interleaves with an event that is
 		// writing an edge to a node this is deleting.
 		if err := s.lockForWrite(ctx, tx); err != nil {
 			return err
+		}
+		// An assertion nobody repeated within the TTL is as stale as the element it named.
+		// #nosec G202 -- the table reference is two quoted identifiers built from a validated graph name
+		if _, err := tx.ExecContext(ctx, `DELETE FROM `+s.provRef()+` WHERE seen_at < $1`, before); err != nil {
+			return fmt.Errorf("prune provenance: %w", err)
 		}
 		// Count what's stale before deleting (DETACH DELETE removes a node's
 		// remaining edges silently; the edge count captures edges stale in their
@@ -859,6 +949,9 @@ func (s *Store) Prune(ctx context.Context, before time.Time) (graph.PruneStats, 
 		}
 		if _, err := tx.ExecContext(ctx, delNodes); err != nil {
 			return fmt.Errorf("prune nodes: %w", err)
+		}
+		if stats.Nodes+stats.Edges > 0 {
+			return s.bumpRemovals(ctx, tx)
 		}
 		return nil
 	})

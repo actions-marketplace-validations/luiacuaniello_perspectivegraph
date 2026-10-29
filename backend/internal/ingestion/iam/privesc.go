@@ -7,11 +7,19 @@ import "strings"
 // granted, minus the account-wide explicit Denies, and capped by the permissions
 // boundary when one is attached. It applies the parts of AWS policy evaluation that
 // are unambiguous without request context - an explicit Deny always beats an Allow,
-// a boundary caps to the intersection - while leaving Condition keys and NotAction
-// out, so detection still errs toward over-reporting rather than missing.
+// a boundary caps to the intersection, an Allow written with NotAction grants all
+// but what it names. Condition keys are not evaluated: an Allow under a condition
+// counts as granted, and a Deny under one is not applied but remembered, so the
+// escalation it might block is reported as depending on it. Both err toward
+// reporting rather than missing.
 type actionSet struct {
 	grants []grant
 	denies []string // account-wide Deny patterns
+	// conditionalDenies are account-wide Deny patterns that apply only under a
+	// Condition. Whether one holds depends on the request - MFA, source address, a tag
+	// - so it is not applied, which would hide an escalation that is real whenever the
+	// condition is not met; the caller reports what it might block as unverified.
+	conditionalDenies []string
 	// boundary is the permissions boundary's own action set, or nil when no boundary
 	// applies. It never grants anything on its own: AWS evaluates a boundary purely as
 	// a cap, so effective permission is the INTERSECTION of the identity policies and
@@ -26,10 +34,25 @@ type actionSet struct {
 }
 
 // grant is one Allow'd action pattern plus whether it was granted account-wide
-// (Resource "*" or a wildcard) rather than on specific literal resources.
+// (Resource "*" or a wildcard) rather than on specific literal resources. A grant
+// written with NotAction is pattern "*" with the named actions as exceptions.
 type grant struct {
 	pattern string
 	broad   bool
+	except  []string
+}
+
+// covers reports whether the grant allows the action.
+func (g grant) covers(action string) bool {
+	if !matchAction(g.pattern, action) {
+		return false
+	}
+	for _, e := range g.except {
+		if matchAction(e, action) {
+			return false
+		}
+	}
+	return true
 }
 
 // add records an account-wide Allow.
@@ -44,10 +67,33 @@ func (a actionSet) addScoped(p string) actionSet {
 	return a
 }
 
+// addAllBut records an Allow written with NotAction: every action but those named.
+func (a actionSet) addAllBut(broad bool, except []string) actionSet {
+	a.grants = append(a.grants, grant{pattern: "*", broad: broad, except: append([]string(nil), except...)})
+	return a
+}
+
 // deny records an account-wide explicit Deny.
 func (a actionSet) deny(p string) actionSet {
 	a.denies = append(a.denies, p)
 	return a
+}
+
+// denyUnder records an account-wide Deny that applies only under a Condition.
+func (a actionSet) denyUnder(p string) actionSet {
+	a.conditionalDenies = append(a.conditionalDenies, p)
+	return a
+}
+
+// conditionallyDenied reports whether a Deny the engine cannot evaluate covers the
+// action: it is blocked when its condition holds and allowed when it does not.
+func (a actionSet) conditionallyDenied(action string) bool {
+	for _, d := range a.conditionalDenies {
+		if matchAction(d, action) {
+			return true
+		}
+	}
+	return a.boundary != nil && a.boundary.conditionallyDenied(action)
 }
 
 // cappedBy applies a permissions boundary: the principal's effective permissions
@@ -82,7 +128,7 @@ func (a actionSet) Allows(action string) bool {
 		return false
 	}
 	for _, g := range a.grants {
-		if matchAction(g.pattern, action) {
+		if g.covers(action) {
 			return true
 		}
 	}
@@ -98,7 +144,7 @@ func (a actionSet) BroadlyAllows(action string) bool {
 		return false
 	}
 	for _, g := range a.grants {
-		if g.broad && matchAction(g.pattern, action) {
+		if g.broad && g.covers(action) {
 			return true
 		}
 	}
@@ -139,7 +185,7 @@ func (a actionSet) IsAdmin() bool {
 		return false
 	}
 	for _, g := range a.grants {
-		if g.pattern == "*" && g.broad {
+		if g.pattern == "*" && g.broad && len(g.except) == 0 {
 			return true
 		}
 	}
@@ -184,32 +230,44 @@ func matchAction(pattern, action string) bool {
 type primitive struct {
 	name    string
 	actions []string
+	// userOnly marks a technique that works on the principal's own user or its groups.
+	// A role is no user and belongs to no group, so a role holding only these actions
+	// can grant power to users it cannot act as - not to itself.
+	userOnly bool
 }
+
+// principalKind is what kind of principal a technique is checked for.
+type principalKind int
+
+const (
+	asUser principalKind = iota
+	asRole
+)
 
 // primitives is the detection table (a curated subset of the well-known AWS IAM
 // privesc paths - Rhino Security Labs / PMapper). Each, if matched, means the
 // principal can grant itself or assume admin-equivalent privileges.
 var primitives = []primitive{
-	{"iam:AttachRolePolicy (attach AdministratorAccess to a role)", []string{"iam:AttachRolePolicy"}},
-	{"iam:AttachUserPolicy (attach AdministratorAccess to self)", []string{"iam:AttachUserPolicy"}},
-	{"iam:PutRolePolicy (inline an admin policy on a role)", []string{"iam:PutRolePolicy"}},
-	{"iam:PutUserPolicy (inline an admin policy on self)", []string{"iam:PutUserPolicy"}},
-	{"iam:CreatePolicyVersion (rewrite an attached policy)", []string{"iam:CreatePolicyVersion"}},
-	{"iam:SetDefaultPolicyVersion (roll back to a permissive version)", []string{"iam:SetDefaultPolicyVersion"}},
-	{"iam:UpdateAssumeRolePolicy (make an admin role assumable)", []string{"iam:UpdateAssumeRolePolicy"}},
-	{"iam:CreateAccessKey (mint keys for a privileged user)", []string{"iam:CreateAccessKey"}},
-	{"iam:CreateLoginProfile (set a console password on a user)", []string{"iam:CreateLoginProfile"}},
-	{"iam:PassRole + lambda:CreateFunction (run code as a passed role)", []string{"iam:PassRole", "lambda:CreateFunction"}},
-	{"iam:PassRole + ec2:RunInstances (launch an instance with a passed role)", []string{"iam:PassRole", "ec2:RunInstances"}},
-	{"iam:PassRole + cloudformation:CreateStack", []string{"iam:PassRole", "cloudformation:CreateStack"}},
-	{"iam:PassRole + glue:CreateDevEndpoint", []string{"iam:PassRole", "glue:CreateDevEndpoint"}},
-	{"iam:PassRole + sagemaker:CreateNotebookInstance", []string{"iam:PassRole", "sagemaker:CreateNotebookInstance"}},
-	{"iam:PassRole + datapipeline:CreatePipeline", []string{"iam:PassRole", "datapipeline:CreatePipeline"}},
-	{"iam:PassRole + codebuild:CreateProject", []string{"iam:PassRole", "codebuild:CreateProject"}},
-	{"iam:AddUserToGroup (add self to a privileged group)", []string{"iam:AddUserToGroup"}},
-	{"iam:AttachGroupPolicy (attach AdministratorAccess to your group)", []string{"iam:AttachGroupPolicy"}},
-	{"iam:PutGroupPolicy (inline an admin policy on your group)", []string{"iam:PutGroupPolicy"}},
-	{"iam:UpdateLoginProfile (reset a privileged user's console password)", []string{"iam:UpdateLoginProfile"}},
+	{name: "iam:AttachRolePolicy (attach AdministratorAccess to a role)", actions: []string{"iam:AttachRolePolicy"}},
+	{name: "iam:AttachUserPolicy (attach AdministratorAccess to self)", actions: []string{"iam:AttachUserPolicy"}, userOnly: true},
+	{name: "iam:PutRolePolicy (inline an admin policy on a role)", actions: []string{"iam:PutRolePolicy"}},
+	{name: "iam:PutUserPolicy (inline an admin policy on self)", actions: []string{"iam:PutUserPolicy"}, userOnly: true},
+	{name: "iam:CreatePolicyVersion (rewrite an attached policy)", actions: []string{"iam:CreatePolicyVersion"}},
+	{name: "iam:SetDefaultPolicyVersion (roll back to a permissive version)", actions: []string{"iam:SetDefaultPolicyVersion"}},
+	{name: "iam:UpdateAssumeRolePolicy (make an admin role assumable)", actions: []string{"iam:UpdateAssumeRolePolicy"}},
+	{name: "iam:CreateAccessKey (mint keys for a privileged user)", actions: []string{"iam:CreateAccessKey"}},
+	{name: "iam:CreateLoginProfile (set a console password on a user)", actions: []string{"iam:CreateLoginProfile"}},
+	{name: "iam:PassRole + lambda:CreateFunction (run code as a passed role)", actions: []string{"iam:PassRole", "lambda:CreateFunction"}},
+	{name: "iam:PassRole + ec2:RunInstances (launch an instance with a passed role)", actions: []string{"iam:PassRole", "ec2:RunInstances"}},
+	{name: "iam:PassRole + cloudformation:CreateStack", actions: []string{"iam:PassRole", "cloudformation:CreateStack"}},
+	{name: "iam:PassRole + glue:CreateDevEndpoint", actions: []string{"iam:PassRole", "glue:CreateDevEndpoint"}},
+	{name: "iam:PassRole + sagemaker:CreateNotebookInstance", actions: []string{"iam:PassRole", "sagemaker:CreateNotebookInstance"}},
+	{name: "iam:PassRole + datapipeline:CreatePipeline", actions: []string{"iam:PassRole", "datapipeline:CreatePipeline"}},
+	{name: "iam:PassRole + codebuild:CreateProject", actions: []string{"iam:PassRole", "codebuild:CreateProject"}},
+	{name: "iam:AddUserToGroup (add self to a privileged group)", actions: []string{"iam:AddUserToGroup"}, userOnly: true},
+	{name: "iam:AttachGroupPolicy (attach AdministratorAccess to your group)", actions: []string{"iam:AttachGroupPolicy"}, userOnly: true},
+	{name: "iam:PutGroupPolicy (inline an admin policy on your group)", actions: []string{"iam:PutGroupPolicy"}, userOnly: true},
+	{name: "iam:UpdateLoginProfile (reset a privileged user's console password)", actions: []string{"iam:UpdateLoginProfile"}},
 }
 
 // privescMatch is one matched escalation primitive and how it was granted.
@@ -220,6 +278,9 @@ type privescMatch struct {
 	// is contingent on those resources being privileged - materially less certain
 	// than an account-wide grant, so the caller scores it lower.
 	ScopedOnly bool
+	// Conditional means a Deny the engine cannot evaluate covers at least one action
+	// the primitive needs: the escalation holds only when that condition does not.
+	Conditional bool
 }
 
 // PrivescPrimitive is one escalation technique exposed for callers that must check
@@ -232,24 +293,37 @@ type PrivescPrimitive struct {
 	// Actions are ALL required: a principal holds this primitive only if every one
 	// of them is permitted.
 	Actions []string
+	// UserOnly marks a technique that only a user can turn on itself (see AppliesTo).
+	UserOnly bool
+}
+
+// AppliesTo reports whether the technique can work for the principal with this ARN. The
+// user-only ones cannot work for a role, and checking them there would confirm an
+// escalation the engine does not claim.
+func (p PrivescPrimitive) AppliesTo(principalARN string) bool {
+	return !p.UserOnly || !strings.Contains(principalARN, ":role/")
 }
 
 // PrivescPrimitives returns the detection table as data.
 func PrivescPrimitives() []PrivescPrimitive {
 	out := make([]PrivescPrimitive, 0, len(primitives))
 	for _, p := range primitives {
-		out = append(out, PrivescPrimitive{Name: p.name, Actions: append([]string(nil), p.actions...)})
+		out = append(out, PrivescPrimitive{Name: p.name, Actions: append([]string(nil), p.actions...), UserOnly: p.userOnly})
 	}
 	return out
 }
 
 // detectPrivesc returns every privesc primitive the principal's permissions
 // enable. A primitive matches when ALL its actions are allowed (explicit Deny
-// already applied by actionSet.Allows).
-func detectPrivesc(a actionSet) []privescMatch {
+// already applied by actionSet.Allows), and when it can work for this kind of
+// principal at all.
+func detectPrivesc(a actionSet, kind principalKind) []privescMatch {
 	var found []privescMatch
 	for _, p := range primitives {
-		allowed, broad := true, true
+		if p.userOnly && kind == asRole {
+			continue
+		}
+		allowed, broad, conditional := true, true, false
 		for _, act := range p.actions {
 			if !a.Allows(act) {
 				allowed = false
@@ -258,9 +332,12 @@ func detectPrivesc(a actionSet) []privescMatch {
 			if !a.BroadlyAllows(act) {
 				broad = false
 			}
+			if a.conditionallyDenied(act) {
+				conditional = true
+			}
 		}
 		if allowed {
-			found = append(found, privescMatch{Name: p.name, ScopedOnly: !broad})
+			found = append(found, privescMatch{Name: p.name, ScopedOnly: !broad, Conditional: conditional})
 		}
 	}
 	return found
