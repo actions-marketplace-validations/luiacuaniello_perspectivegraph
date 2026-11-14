@@ -20,7 +20,7 @@
 #     CI - and Dependabot proposes Caddy's releases. go.sum pins every module's hash.
 #
 # The official image's Alpine userland is gone with it: it carried a High of its own, in zlib.
-FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS build
+FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf AS build
 WORKDIR /src
 COPY go.mod go.sum main.go ./
 # Caddy reads its version from the build information of the module that requires it, so
@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/caddy . \
  && mkdir -p /out/data /out/config
 
-FROM gcr.io/distroless/static-debian13:nonroot@sha256:18f4cc26c9ffa7f20a359298be7deadac5c607c8e03a02b8119f1a5fc2f82c99
+FROM gcr.io/distroless/static-debian13:nonroot@sha256:aafe993665bf6200db38a02c11a9351e782a84b6a45e7f33b6695638c88e3931
 COPY --from=build /out/caddy /usr/bin/caddy
 # The certificates and the ACME account key live in /data, a volume in the compose file. An
 # empty volume takes the owner of the directory it is mounted over, so these two make it
