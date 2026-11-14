@@ -30,13 +30,13 @@
 #     --certificate-oidc-issuer https://token.actions.githubusercontent.com
 services:
   backend:
-    image: ghcr.io/luiacuaniello/perspectivegraph:v1.39.2 # x-release-please-version
+    image: ghcr.io/luiacuaniello/perspectivegraph:v1.39.3 # x-release-please-version
     pull_policy: always
 
   frontend:
-    image: ghcr.io/luiacuaniello/perspectivegraph-dashboard:v1.39.2 # x-release-please-version
+    image: ghcr.io/luiacuaniello/perspectivegraph-dashboard:v1.39.3 # x-release-please-version
     pull_policy: always
 
   postgres:
-    image: ghcr.io/luiacuaniello/perspectivegraph-postgres:v1.39.2 # x-release-please-version
+    image: ghcr.io/luiacuaniello/perspectivegraph-postgres:v1.39.3 # x-release-please-version
     pull_policy: always
